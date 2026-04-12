@@ -1,6 +1,6 @@
 # OKX Spot Trading Bot
 
-[Türkçe README](./README_TR_updated.md)
+[Türkçe README](./README_TR.md)
 
 A modular spot trading bot for OKX built around technical signals, market regime detection, risk controls, TP/SL logic, Telegram monitoring, and an optional AI research layer.
 
