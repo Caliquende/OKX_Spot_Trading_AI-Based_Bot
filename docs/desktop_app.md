@@ -53,6 +53,17 @@ The Risk Controls screen writes the same kind of state flags that the bot alread
 
 Destructive actions such as direct close-all are intentionally not implemented in the first desktop version.
 
+## Symbol Filtering
+
+The Positions screen uses `SYMBOLS` from `.env` as the configured universe.
+
+It shows:
+
+- configured symbols from `.env`,
+- any unexpected unconfigured position if it is still `OPEN` and has quantity.
+
+It hides stale unconfigured closed rows from the main Positions screen, because those rows can otherwise look like live pairs. Hidden stale rows are listed in Settings Snapshot under `Hidden stale DB-only position rows`.
+
 ## Current Limits
 
 - The app is a first desktop control tower version, not a packaged `.exe` yet.

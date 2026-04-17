@@ -98,9 +98,16 @@ def resolve_db_path(cli_path: str | None = None) -> Path:
     return candidate
 
 
+def configured_symbols_from_env() -> list[str]:
+    raw = os.getenv("SYMBOLS", "")
+    return [item.strip().upper() for item in raw.split(",") if item.strip()]
+
+
 class BotDataStore:
     def __init__(self, db_path: Path):
         self.db_path = db_path
+        self.configured_symbols = configured_symbols_from_env()
+        self.configured_symbol_set = set(self.configured_symbols)
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.db_path, timeout=10)
@@ -186,7 +193,7 @@ class BotDataStore:
             """
         )
 
-    def positions(self) -> list[dict[str, Any]]:
+    def all_positions(self) -> list[dict[str, Any]]:
         return self.fetch_all(
             """
             SELECT *
@@ -194,6 +201,29 @@ class BotDataStore:
             ORDER BY status DESC, symbol ASC
             """
         )
+
+    def positions(self) -> list[dict[str, Any]]:
+        rows = self.all_positions()
+        if not self.configured_symbol_set:
+            return rows
+        visible: list[dict[str, Any]] = []
+        for row in rows:
+            symbol = str(row.get("symbol") or "").upper()
+            is_open = str(row.get("status") or "").upper() == "OPEN" and float(row.get("qty") or 0.0) > 0
+            if symbol in self.configured_symbol_set or is_open:
+                visible.append(row)
+        return visible
+
+    def stale_unconfigured_positions(self) -> list[dict[str, Any]]:
+        if not self.configured_symbol_set:
+            return []
+        stale: list[dict[str, Any]] = []
+        for row in self.all_positions():
+            symbol = str(row.get("symbol") or "").upper()
+            is_open = str(row.get("status") or "").upper() == "OPEN" and float(row.get("qty") or 0.0) > 0
+            if symbol not in self.configured_symbol_set and not is_open:
+                stale.append(row)
+        return stale
 
     def recent_orders(self, limit: int = 80) -> list[dict[str, Any]]:
         return self.fetch_all(
@@ -709,18 +739,21 @@ class BotDesktopApp(tk.Tk):
         frame = self._panel(self.content, 0, 0, "Positions", "SQLite positions snapshot. Market price yoksa PnL tahmini yapılmaz.")
         self.positions_tree = self._make_tree(
             frame,
-            ("symbol", "qty", "avg", "realized", "fees", "status", "updated"),
-            ("Symbol", "Qty", "Avg Entry", "Realized PnL", "Fees", "Status", "Updated"),
+            ("symbol", "source", "qty", "avg", "realized", "fees", "status", "updated"),
+            ("Symbol", "Source", "Qty", "Avg Entry", "Realized PnL", "Fees", "Status", "Updated"),
         )
 
     def _render_positions(self) -> None:
         self.positions_tree.delete(*self.positions_tree.get_children())
         for row in self.store.positions():
+            symbol = str(row.get("symbol") or "").upper()
+            source = "CONFIGURED" if not self.store.configured_symbol_set or symbol in self.store.configured_symbol_set else "UNCONFIGURED OPEN"
             self.positions_tree.insert(
                 "",
                 "end",
                 values=(
                     row.get("symbol", "-"),
+                    source,
                     format_float(row.get("qty"), 8),
                     format_float(row.get("avg_entry_price"), 6),
                     format_money(row.get("realized_pnl_quote")),
@@ -912,11 +945,23 @@ class BotDesktopApp(tk.Tk):
         counts = self.store.counts()
         lines = [
             f"DB path: {self.store.db_path}",
+            f"Configured symbols: {', '.join(self.store.configured_symbols) or '-'}",
             "",
             "Table counts:",
         ]
         for key, value in counts.items():
             lines.append(f"  {key}: {value}")
+        stale = self.store.stale_unconfigured_positions()
+        if stale:
+            lines += ["", "Hidden stale DB-only position rows:"]
+            for row in stale:
+                lines.append(
+                    "  "
+                    f"{row.get('symbol')} "
+                    f"status={row.get('status')} "
+                    f"qty={format_float(row.get('qty'), 8)} "
+                    f"updated={format_ms(row.get('updated_at_ms'))}"
+                )
         lines += ["", "Safe bot_state keys:"]
         for key, value in self.store.safe_state_rows():
             lines.append(f"  {key}: {value}")
