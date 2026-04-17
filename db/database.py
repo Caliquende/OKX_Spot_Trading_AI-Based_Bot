@@ -1,24 +1,38 @@
 from __future__ import annotations
 
 """
-SQLITE ALTYAPISI
-===============
+SQLITE ALTYAPISI / SQLITE INFRASTRUCTURE
+========================================
 
-Bu dosya SQLite bağlantısını, execute/fetch helper'larını ve schema init mantığını taşır.
-En kritik görevlerinden biri bot ilk ayağa kalktığında gerekli tabloların varlığını garanti etmektir.
+TR:
+Bu dosya SQLite baglantisini, execute/fetch helper'larini ve schema init mantigini tasir.
+En kritik gorevlerinden biri bot ilk ayaga kalktiginda gerekli tablolarin varligini garanti etmektir.
 
-Yeni chat'te bu dosya özellikle şu sorular için önemlidir:
+Bu dosya su sorular icin ozellikle onemlidir:
 - Hangi tablolar var?
-- Primary key / conflict davranışları nasıl?
-- Yeni state eklenince migration benzeri schema eklemesi nereye yapılır?
-- fills.realized_pnl_quote gibi sonradan eklenen muhasebe kolonları nasıl migrate edilir?
+- Primary key ve conflict davranisi nasil?
+- Yeni state eklenince migration benzeri schema eklemesi nereye yapilir?
+- `fills.realized_pnl_quote` gibi sonradan eklenen muhasebe kolonlari nasil eklenir?
 
-P0.5 notu
---------
-/daily_pnl komutunun güvenilir çalışabilmesi için fill-level realized pnl saklanmalıdır.
-Sadece positions.realized_pnl_quote toplamını tutmak günlük kırılım için yetmez.
-Bu yüzden fills tablosuna realized_pnl_quote kolonu eklenir ve eski DB'lere
-ALTER TABLE ile migration uygulanır.
+P0.5 notu:
+`/daily_pnl` komutunun guvenilir calisabilmesi icin fill-level realized pnl saklanmalidir.
+Sadece `positions.realized_pnl_quote` toplamı gunluk kirilim icin yetmez.
+Bu yuzden `fills` tablosuna `realized_pnl_quote` kolonu eklenir ve eski DB'lere ALTER TABLE ile migration uygulanir.
+
+EN:
+This file contains SQLite connection handling, execute/fetch helpers, and schema initialization logic.
+One of its most important jobs is to guarantee that required tables exist when the bot starts.
+
+This file matters especially for questions like:
+- Which tables exist?
+- How do primary keys and conflicts behave?
+- Where should schema-extension logic be added when new state is introduced?
+- How are later accounting columns such as `fills.realized_pnl_quote` migrated?
+
+P0.5 note:
+For `/daily_pnl` to work reliably, realized PnL must be stored at the fill level.
+Keeping only cumulative `positions.realized_pnl_quote` is not enough for daily breakdowns.
+That is why the `fills` table contains `realized_pnl_quote` and old DBs are upgraded with `ALTER TABLE`.
 """
 
 
@@ -39,30 +53,36 @@ class Database:
     """
 
     def __init__(self, path: str):
-        # path = SQLite dosyasının diskteki adresi.
-        # Önce tablo yapısını hazırlarız, sonra performans ayarlarını açarız.
+        # TR: path = SQLite dosyasinin diskteki adresi. Once schema, sonra pragma ayarlari kurulur.
+        # EN: path = on-disk location of the SQLite file. We initialize schema first, then runtime pragmas.
         self.path = path
         self._init_schema()
         self._init_pragmas()
 
     def _connect(self) -> sqlite3.Connection:
-        # Burada gerçek SQLite bağlantısı açılır.
-        # timeout=30 demek, DB kısa süre kilitliyse hemen patlama, biraz bekle demektir.
-        # check_same_thread=False demek, botun farklı thread'leri aynı DB'yi kullanabilsin demektir.
+        # TR: Burada gercek SQLite baglantisi acilir.
+        # EN: This is where the real SQLite connection is created.
+        # TR: timeout=30 ise DB kisa sure kilitliyse hemen patlamak yerine biraz bekler.
+        # EN: timeout=30 means we wait a bit instead of failing immediately when the DB is briefly locked.
+        # TR: check_same_thread=False farkli thread'lerin ayni DB'yi kullanabilmesini saglar.
+        # EN: check_same_thread=False allows different threads to use the same DB.
         con = sqlite3.connect(
             self.path,
             timeout=30,                 # 🔥 lock olursa bekler
             check_same_thread=False     # 🔥 multi-access izin
         )
-        # row_factory sayesinde satırlar tuple değil, isimli kolon gibi okunur.
-        # Yani row["status"] diye erişebiliriz.
+        # TR: row_factory sayesinde satirlar tuple yerine isimli kolon gibi okunur.
+        # EN: row_factory makes rows behave like named-column records instead of plain tuples.
         con.row_factory = sqlite3.Row
         return con
 
     def _init_pragmas(self) -> None:
-        # PRAGMA ayarları SQLite'ın çalışma karakterini belirler.
-        # WAL modu yazma/okuma çakışmalarında çok işe yarar.
-        # synchronous=NORMAL biraz performans, biraz güvenlik dengesi sağlar.
+        # TR: PRAGMA ayarlari SQLite'in calisma karakterini belirler.
+        # EN: PRAGMA settings define the runtime behavior of SQLite.
+        # TR: WAL modu eszamanli okuma/yazma durumlarinda cok faydalidir.
+        # EN: WAL mode is very helpful for concurrent reads and writes.
+        # TR: synchronous=NORMAL performans ve guvenlik arasinda denge kurar.
+        # EN: synchronous=NORMAL balances performance and safety.
         with self._connect() as con:
             con.execute("PRAGMA journal_mode=WAL;")      # 🔥 en kritik
             con.execute("PRAGMA synchronous=NORMAL;")    # 🔥 performans + stability

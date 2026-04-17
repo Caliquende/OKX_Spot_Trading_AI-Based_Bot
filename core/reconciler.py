@@ -4,30 +4,51 @@ from __future__ import annotations
 RECONCILER
 ==========
 
-Bu dosya botun en kritik muhasebe katmanlarından biridir. Kısaca görevi:
+TR:
+Bu dosya botun en kritik muhasebe katmanlarindan biridir.
+Kisaca gorevi:
 - exchange order status sync
-- exchange fills / trades çekme
+- exchange fills / trades cekme
 - DB fills tablosuna yazma
 - fills + balance verisinden position rebuild etme
 
 Neden kritik?
--------------
-Çünkü trading botların en tehlikeli bug'ları çoğu zaman sinyal motorunda değil,
-POZİSYON GERÇEĞİ ile DB GERÇEĞİ birbirinden koptuğunda ortaya çıkar.
+Cunku trading botlarda en tehlikeli bug'lar cogu zaman sinyal motorunda degil,
+pozisyon gercegi ile DB gercegi birbirinden koptugunda ortaya cikar.
 
-Bu dosya özellikle şu problemleri önlemek için vardır:
+Bu dosya ozellikle su problemleri azaltmak icin vardir:
 - sandbox false zero balance
 - duplicate fill
 - avg_entry drift
-- force close yanlış tetiklenmesi
-- dust nedeniyle phantom position
-- fee kaynaklı cost basis hatası
+- force close'un yanlis tetiklenmesi
+- dust kaynakli phantom position
+- fee kaynakli cost basis hatasi
 
-Yeni chat'te buraya özellikle bakılması gereken yerler:
-- _sync_trades
-- _build_from_fills
-- _rebuild_position
-- meaningful mismatch / dust / preserve_on_balance_error mantıkları
+Yeni birinin bakmasi gereken yerler:
+- `_sync_trades`
+- `_build_from_fills`
+- `_rebuild_position`
+- meaningful mismatch / dust / preserve_on_balance_error mantiklari
+
+EN:
+This file is one of the most critical accounting layers of the bot.
+Its job is to:
+- sync exchange order status,
+- fetch exchange fills and trades,
+- write them into the DB,
+- rebuild positions from fills and balances.
+
+Why is it critical?
+Because the most dangerous trading-bot bugs usually appear not in the signal engine,
+but when exchange reality and DB reality drift apart.
+
+This file mainly exists to reduce issues such as:
+- false zero balance in sandbox,
+- duplicate fills,
+- average-entry drift,
+- wrong force-close triggers,
+- phantom positions caused by dust,
+- fee-related cost-basis errors.
 """
 
 
@@ -37,33 +58,46 @@ import time
 
 class Reconciler:
     """
-    Reconciler.
+    TR:
+    Bu sinifin gorevi uc parcalidir:
+    1) order status sync
+    2) exchange trade history -> fills tablosu
+    3) position rebuild
 
-    Bu sınıfın görevi üç parçalıdır:
-    1) Order status sync
-    2) Exchange trade history -> fills tablosu
-    3) Position rebuild
+    En buyuk tasarim dersi:
+    Eski versiyon fills_qty ile base balance'i sert sekilde override ediyordu.
+    Bunun sonucu yanlis force close, avg bozulmasi ve gereksiz churn idi.
 
-    EN BÜYÜK TASARIM DERSİ:
-    Eski versiyon fills_qty ile base balance'ı sert şekilde birbirine override ediyordu.
-    Bunun sonucu:
-    - sandbox'ta false zero balance yüzünden fake force close
-    - live'da qty clamp yüzünden avg bozulması
-    - TP/SL state reset
-    - dust miktarlarda gereksiz close/reopen churn
+    Yeni yaklasim:
+    - fills = muhasebe ve realized pnl kaynagi
+    - balance = elde gercekte ne kadar coin var sorusunun cevabi
+    - qty icin balance onceliklidir
+    - avg_entry_price icin mumkunse fills muhasebesi kullanilir
+    - mikro dust miktarlari gercek pozisyon sayilmaz
+    - balance fetch patladi diye pozisyonu kor olmadan sifirlamayiz
 
-    Bu yeni versiyonda yaklaşım daha nettir:
-    - fills = muhasebe ve realized pnl kaynağı
-    - balance = elde gerçekten ne kadar coin var sorusunun cevabı
-    - qty için balance önceliklidir
-    - avg_entry_price için mümkünse fills muhasebesi kullanılır
-    - ama "mikro toz" miktarları gerçek pozisyon sayılmaz
-    - balance fetch patladı diye açık pozisyonu kör şekilde sıfırlamayız
+    EN:
+    This class has three major jobs:
+    1) order status sync
+    2) exchange trade history -> fills table
+    3) position rebuild
+
+    Main design lesson:
+    The old version tried to force fills_qty and base balance to overwrite each other.
+    That caused false closes, average-price corruption, and unnecessary churn.
+
+    New approach:
+    - fills = accounting and realized PnL source
+    - balance = answer to "how much coin do we really hold now?"
+    - quantity follows balance first
+    - average entry uses fills accounting when possible
+    - tiny dust is not treated as a real position
+    - a balance fetch error should not blindly zero a valid open position
     """
 
     def __init__(self, exchange, orders_repo, fills_repo, positions_repo, bot_state_repo=None):
-        # Reconciler tek başına çalışmaz.
-        # Borsaya erişim için exchange, DB erişimi için repo nesneleri gerekir.
+        # TR: Reconciler tek basina calismaz; exchange ve repo nesnelerine ihtiyac duyar.
+        # EN: Reconciler cannot work alone; it needs exchange access and repository objects.
         self.exchange = exchange
         self.orders_repo = orders_repo
         self.fills_repo = fills_repo
@@ -71,20 +105,20 @@ class Reconciler:
         self.bot_state_repo = bot_state_repo
 
     def now_ms(self) -> int:
-        # Her yerde aynı zaman formatını kullanalım diye helper.
+        # TR: Her yerde ayni zaman formatini kullanmak icin helper.
+        # EN: Helper used so every layer uses the same time format.
         return int(time.time() * 1000)
 
     def sync_symbol(self, symbol: str) -> None:
-        # Bir symbol'ü uzlaştırmanın ana sırası:
-        # 1) order durumlarını güncelle
-        # 2) trade/fill geçmişini çek
-        # 3) eldeki verilerle pozisyonu yeniden kur
+        # TR: Bir sembolu uzlastirmanin ana sirasi: order sync -> trade sync -> position rebuild.
+        # EN: Main reconciliation order for a symbol: order sync -> trade sync -> position rebuild.
         self._sync_orders(symbol)
         self._sync_trades(symbol)
         self._rebuild_position(symbol)
 
     def _settings(self):
-        # Ayarları exchange üstünden alıyoruz çünkü projede öyle bağlanmış.
+        # TR: Ayarlari exchange ustunden aliyoruz cunku proje baglantisi boyle kurulmus.
+        # EN: Settings are read through the exchange adapter because that is how the project is wired.
         return getattr(self.exchange, "settings", None)
 
     def _reconcile_anchor_key(self, symbol: str) -> str:

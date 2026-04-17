@@ -34,14 +34,16 @@ class RiskEngine:
 
         total_balance = float(portfolio.get("total_balance") or 0.0)
         cash_balance = float(portfolio.get("cash_balance") or 0.0)
+        min_free_usdt = float(getattr(self.settings, "min_free_usdt", 0.0) or 0.0)
 
         if total_balance <= 0:
             return False, 0.0, "invalid_total_balance"
 
         # -------- 1. single trade cap --------
         max_trade_quote = total_balance * self.max_single_trade_pct
+        cash_usable_quote = max(0.0, cash_balance - min_free_usdt)
 
-        allowed_quote = min(desired_quote, max_trade_quote)
+        allowed_quote = min(desired_quote, max_trade_quote, cash_usable_quote)
 
         # -------- 2. total exposure cap --------
         deployed = total_balance - cash_balance
@@ -50,16 +52,25 @@ class RiskEngine:
         if current_exposure_pct >= self.max_total_exposure_pct:
             return False, 0.0, "max_total_exposure_reached"
 
-        # -------- 3. symbol exposure cap (existing logic safe) --------
+        remaining_total_exposure_quote = max(
+            0.0,
+            total_balance * self.max_total_exposure_pct - deployed,
+        )
+        allowed_quote = min(allowed_quote, remaining_total_exposure_quote)
+
+        # -------- 3. symbol exposure cap --------
+        # TR: Bu sınır sadece mevcut pozisyonu olan semboller için değil,
+        # yeni açılacak ilk entry için de uygulanmalıdır.
+        # EN: This cap must apply not only to symbols with an existing position,
+        # but also to a brand-new first entry.
+        position_value = 0.0
         if position:
             position_value = float(position["qty"] or 0.0) * last_price
-            new_total = position_value + allowed_quote
-
-            if new_total > total_balance * self.settings.max_symbol_exposure_pct:
-                allowed_quote = max(
-                    0.0,
-                    total_balance * self.settings.max_symbol_exposure_pct - position_value,
-                )
+        remaining_symbol_quote = max(
+            0.0,
+            total_balance * self.settings.max_symbol_exposure_pct - position_value,
+        )
+        allowed_quote = min(allowed_quote, remaining_symbol_quote)
 
         # -------- 4. min order --------
         if allowed_quote < self.settings.min_order_quote_usdt:

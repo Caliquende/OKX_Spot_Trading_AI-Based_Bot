@@ -1,25 +1,44 @@
 from __future__ import annotations
 
 """
-KONFİGÜRASYON KATMANI
-====================
+KONFIGURASYON KATMANI / CONFIGURATION LAYER
+===========================================
 
-Bu dosya .env -> Settings dönüşümünü yapar. Botun davranışını değiştiren neredeyse tüm eşikler burada toplanır.
+TR:
+Bu dosya `.env` -> `Settings` donusumunu yapar.
+Botun davranisini degistiren neredeyse tum esikler burada toplanir.
 
-Ana kategori başlıkları:
+Ana kategori basliklari:
 - Exchange / sandbox / dry_run
-- Loop ve veri çekme ayarları
-- Entry / exit threshold'ları
+- Loop ve veri cekme ayarlari
+- Entry / exit threshold'lari
 - Scale-in parametreleri
 - TP/SL parametreleri
-- Regime engine eşikleri
-- Telegram / LLM / debug ayarları
+- Regime engine esikleri
+- Telegram / LLM / debug ayarlari
 
-ÖNEMLİ NOT
------------
-Settings katmanı statik config içindir. Runtime state burada üretilmemelidir.
-Eğer canlı çalışırken değişen bir bilgi varsa (örn streak count, bot state, lock state),
-ora artık DB / runtime katmanıdır; settings değildir.
+Onemli not:
+Settings katmani statik config icindir. Runtime state burada uretilmemelidir.
+Canli calisirken degisen bir bilgi varsa (ornegin streak count, bot state, lock state),
+orasi artik DB veya runtime katmanidir; settings degildir.
+
+EN:
+This file converts `.env` values into the `Settings` object.
+Almost every threshold that changes bot behavior is collected here.
+
+Main categories:
+- Exchange / sandbox / dry_run
+- Loop and market-data settings
+- Entry / exit thresholds
+- Scale-in parameters
+- TP/SL parameters
+- Regime engine thresholds
+- Telegram / LLM / debug settings
+
+Important note:
+The settings layer is for static configuration.
+Runtime state must not be produced here.
+If a value changes while the bot is running, it belongs in the DB or runtime layer, not in settings.
 """
 
 import os
@@ -30,19 +49,30 @@ from dotenv import load_dotenv, find_dotenv
 
 def _load_project_env() -> None:
     """
-    Env yükleme fallback zinciri.
+    TR:
+    Env yukleme fallback zinciri.
 
     Neden var?
-    - Bazı paketlemelerde .env dosyası gizli dosya olduğu için eksik/yeniden adlandırılmış gelebiliyor.
-    - Kullanıcının projedeki dosyası `.env` ya da `_ .env` benzeri bir varyant olabiliyor.
-    - Çalışma dizini değiştiğinde dotenv default araması bazen sessizce boşa düşüyor.
+    - Bazi paketlemelerde .env gizli dosya oldugu icin eksik veya yeniden adlandirilmis gelebiliyor.
+    - Kullanici `.env` ya da `_.env` benzeri varyant kullanabiliyor.
+    - Calisma dizini degistiginde dotenv'in varsayilan kesfi bosa dusabiliyor.
+
+    EN:
+    Fallback chain for loading environment files.
+
+    Why does this exist?
+    - In some setups, `.env` may be missing or renamed.
+    - Users may keep settings in `.env` or `_.env`.
+    - Default dotenv discovery may silently fail when the working directory changes.
     """
-    # 1) dotenv'in kendi standart keşfi
+    # TR: once dotenv'in kendi standart kesfini deniyoruz.
+    # EN: first we try dotenv's normal discovery mechanism.
     found = find_dotenv(usecwd=True)
     if found:
         load_dotenv(found, override=False)
 
-    # 2) Proje kökünde açık fallback denemeleri
+    # TR: sonra proje kokunde acik fallback adaylarini tek tek deniyoruz.
+    # EN: then we try explicit fallback candidates in the project root.
     project_root = Path(__file__).resolve().parent.parent
     for candidate in (project_root / '.env', project_root / '_.env', Path.cwd() / '.env', Path.cwd() / '_.env'):
         if candidate.exists():
@@ -53,8 +83,8 @@ _load_project_env()
 
 
 def _env(name: str, default: str | None = None, required: bool = False) -> str:
-    # Tek bir env değişkenini oku.
-    # required=True ise eksikse hata ver.
+    # TR: Tek bir env degiskenini oku. required=True ise eksikse hata ver.
+    # EN: Read a single env variable. If required=True and it is missing, raise an error.
     value = os.getenv(name, default)
     if required and (value is None or str(value).strip() == ""):
         raise RuntimeError(f"Missing required env var: {name}")
@@ -62,8 +92,8 @@ def _env(name: str, default: str | None = None, required: bool = False) -> str:
 
 
 def _env_first(names: list[str], default: str | None = None, required: bool = False) -> str:
-    # Birden fazla isim dene; ilk dolu olanı kullan.
-    # Eski/yeni env isimleri arasında uyumluluk için işe yarar.
+    # TR: Birden fazla isim dene; ilk dolu olani kullan. Eski/yeni env uyumlulugu icin faydalidir.
+    # EN: Try multiple env names and use the first non-empty one. Useful for backward compatibility.
     for name in names:
         value = os.getenv(name)
         if value is not None and str(value).strip() != "":
@@ -74,22 +104,26 @@ def _env_first(names: list[str], default: str | None = None, required: bool = Fa
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
-    # "true/1/yes/on" gibi değerleri Python bool'a çevirir.
+    # TR: "true/1/yes/on" gibi degerleri Python bool'a cevirir.
+    # EN: Converts string values such as "true/1/yes/on" into a Python boolean.
     return _env(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_float(name: str, default: str) -> float:
-    # Sayısal env'i float'a çevir.
+    # TR: Sayisal env degerini float'a cevir.
+    # EN: Convert a numeric env value into float.
     return float(_env(name, default))
 
 
 def _env_int(name: str, default: str) -> int:
-    # Sayısal env'i int'e çevir.
+    # TR: Sayisal env degerini int'e cevir.
+    # EN: Convert a numeric env value into int.
     return int(_env(name, default))
 
 
 def _env_list(name: str, default: str) -> list[str]:
-    # Virgülle ayrılmış env'i listeye çevir.
+    # TR: Virgulle ayrilmis env degerini listeye cevir.
+    # EN: Convert a comma-separated env value into a Python list.
     raw = _env(name, default)
     return [x.strip() for x in raw.split(",") if x.strip()]
 
@@ -127,6 +161,8 @@ class Settings:
     max_symbol_exposure_pct: float = _env_float("MAX_SYMBOL_EXPOSURE_PCT", "0.35")
     max_total_exposure_pct: float = _env_float("MAX_TOTAL_EXPOSURE_PCT", "0.90")
     max_single_trade_pct: float = _env_float("MAX_SINGLE_TRADE_PCT", "0.10")
+    max_daily_realized_loss_usdt: float = _env_float("MAX_DAILY_REALIZED_LOSS_USDT", "0")
+    max_daily_drawdown_pct: float = _env_float("MAX_DAILY_DRAWDOWN_PCT", "0")
 
     # ---------------- BASE ENTRY SIZING ----------------
     buy_pct: float = _env_float("BUY_PCT", "0.04")
@@ -156,6 +192,12 @@ class Settings:
     partial_take_profit_pct: float = _env_float("PARTIAL_TAKE_PROFIT_PCT", "0.05")
     full_take_profit_enabled: bool = _env_bool("FULL_TAKE_PROFIT_ENABLED", "true")
     full_take_profit_pct: float = _env_float("FULL_TAKE_PROFIT_PCT", "0.12")
+    break_even_stop_enabled: bool = _env_bool("BREAK_EVEN_STOP_ENABLED", "true")
+    break_even_activation_pct: float = _env_float("BREAK_EVEN_ACTIVATION_PCT", "0.03")
+    break_even_buffer_pct: float = _env_float("BREAK_EVEN_BUFFER_PCT", "0.002")
+    trailing_take_profit_enabled: bool = _env_bool("TRAILING_TAKE_PROFIT_ENABLED", "true")
+    trailing_take_profit_activation_pct: float = _env_float("TRAILING_TAKE_PROFIT_ACTIVATION_PCT", "0.05")
+    trailing_take_profit_giveback_pct: float = _env_float("TRAILING_TAKE_PROFIT_GIVEBACK_PCT", "0.02")
 
     # ---------------- REGIME ENGINE ----------------
     regime_enabled: bool = _env_bool("REGIME_ENABLED", "false")
@@ -244,6 +286,10 @@ class Settings:
     groq_model: str = _env("GROQ_MODEL", "")
     groq_fallback_model: str = _env("GROQ_FALLBACK_MODEL", "")
     groq_fallback_fallback_model: str = _env("GROQ_FALLBACK_FALLBACK_MODEL", "")
+    groq_fallback_fallback_fallback_model: str = _env("GROQ_FALLBACK_FALLBACK_FALLBACK_MODEL", "")
+    groq_fallback_fallback_fallback_fallback_model: str = _env("GROQ_FALLBACK_FALLBACK_FALLBACK_FALLBACK_MODEL", "")
+    groq_cache_ttl_seconds: int = _env_int("GROQ_CACHE_TTL_SECONDS", "36000")
+    threshold_update_ttl_seconds: int = _env_int("THRESHOLD_UPDATE_TTL_SECONDS", "36000")
     research_context_max_chars: int = _env_int("RESEARCH_CONTEXT_MAX_CHARS", "700")
     bulk_refresh_max_context_chars_per_symbol: int = _env_int("BULK_REFRESH_MAX_CONTEXT_CHARS_PER_SYMBOL", "420")
     threshold_snapshot_max_symbols: int = _env_int("THRESHOLD_SNAPSHOT_MAX_SYMBOLS", "5")

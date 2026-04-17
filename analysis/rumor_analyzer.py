@@ -1,17 +1,28 @@
 from __future__ import annotations
 
 """
-RUMOR / LLM ANALYSIS KATMANI
-===========================
+RUMOR / LLM ANALYSIS LAYER
+==========================
 
-Botun dış dünya + LLM sentiment tarafı burada.
-Bu sürümde düzeltilen kritik problemler:
-- Groq bulk refresh promptu artık single-symbol JSON promptuyla çakışmıyor.
-- Bulk refresh JSON parse akışı düzeltildi; fenced code block içeriği artık yanlışlıkla çöpe atılmıyor.
-- Per-symbol fallback Groq analizi artık sadece sembol adıyla kör gitmiyor; CoinGecko + Exa bağlamı ekleniyor.
-- Exa entegrasyonu artık yalnızca exa-py paketine bağlı değil; önce HTTP API, sonra SDK fallback deneniyor.
-- Enabled provider listesi artık gerçekten enabled provider'lardan oluşuyor. Disabled provider çöplüğü logu kirletmiyor.
-- Refresh timestamp'leri yalnızca başarılı response + başarılı parse sonrası güncelleniyor.
+TR:
+Botun dis dunya + LLM sentiment tarafi burada.
+Bu surumde duzeltilen kritik problemler:
+- Groq bulk refresh promptu artik single-symbol JSON promptuyla cakismiyor.
+- Bulk refresh JSON parse akisi duzeltildi; fenced code block icerigi cope gitmiyor.
+- Per-symbol fallback Groq analizi artik sadece sembol adiyla kor gitmiyor; CoinGecko + Exa baglami ekleniyor.
+- Exa entegrasyonu yalnizca exa-py paketine bagli degil; once HTTP API, sonra SDK fallback deneniyor.
+- Enabled provider listesi gercekten enabled provider'lardan olusuyor.
+- Refresh timestamp'leri sadece basarili response + basarili parse sonrasi guncelleniyor.
+
+EN:
+This is the external-world and LLM sentiment layer of the bot.
+Important fixes in this version:
+- Groq bulk refresh no longer conflicts with the single-symbol JSON prompt.
+- Bulk refresh JSON parsing was fixed so fenced code blocks are not accidentally discarded.
+- Per-symbol fallback analysis no longer goes in blind with only the symbol name; CoinGecko + Exa context is added.
+- Exa integration is not tied only to exa-py; HTTP API is tried first, then SDK fallback.
+- The enabled provider list now truly contains only enabled providers.
+- Refresh timestamps are updated only after successful response and successful parse.
 """
 
 import json
@@ -56,32 +67,89 @@ def _dedupe_models(models: list[str]) -> list[str]:
         cleaned.append(value)
     return cleaned
 
-GROQ_CACHE_TTL_SECONDS = 10 * 60 * 60
-THRESHOLD_UPDATE_TTL_SECONDS = 10 * 60 * 60
+# TR: Bu iki TTL artik .env uzerinden yonetiliyor. Kod degistirmeden AI refresh araligini ayarlayabilirsin.
+# EN: These two TTL values are now controlled through `.env`, so AI refresh cadence can be changed without editing code.
+GROQ_CACHE_TTL_SECONDS = max(0, int(getattr(settings, "groq_cache_ttl_seconds", 10 * 60 * 60) or 0))
+THRESHOLD_UPDATE_TTL_SECONDS = max(0, int(getattr(settings, "threshold_update_ttl_seconds", 10 * 60 * 60) or 0))
 RESEARCH_CONTEXT_TTL_SECONDS = 30 * 60
 EXA_TIMEOUT_SECONDS = 20
 COINGECKO_TIMEOUT_SECONDS = 10
 MAX_EXA_RESULTS = 5
 
+AI_SCORE_MIN = -24
+AI_SCORE_MAX = 24
+
 STANCE_DEFAULT_SCORES = {
-    "STRONG_SELL": -8,
-    "SELL": -5,
+    "STRONG_SELL": -16,
+    "SELL": -8,
     "HOLD": 0,
-    "BUY": 5,
-    "STRONG_BUY": 8,
+    "BUY": 8,
+    "STRONG_BUY": 16,
 }
 VALID_STANCES = set(STANCE_DEFAULT_SCORES.keys())
 
-GROQ_SINGLE_SYMBOL_SYSTEM_PROMPT = """You are a crypto trading assistant.
+GROQ_SINGLE_SYMBOL_SYSTEM_PROMPT = """You are a crypto trading master economist.
 Return ONLY valid JSON with this exact schema:
-{"stance":"STRONG_BUY|BUY|HOLD|SELL|STRONG_SELL","score":-10,"confidence":0.0,"reasoning":"brief explanation"}
+{"stance":"STRONG_BUY|BUY|HOLD|SELL|STRONG_SELL","score":0,"confidence":0.0,"reasoning":"brief explanation"}
+Rules:
+- Do not say "generic news". If there is no meaningful catalyst, say "no clear asset-specific catalyst".
+- HOLD is for balanced or unclear setups; it is not the default answer for every weak-context case.
+- If the supplied context clearly leans bullish or bearish, mild BUY or SELL is acceptable.
+- Do not invent technical levels, support, resistance, or breakout states unless they are explicitly present in the supplied context.
+- Use the full score band intelligently. Do not default to the same score for every stance.
 Do not wrap JSON in markdown. Do not add any prose before or after the JSON.
 """
 
-GROQ_BULK_SYSTEM_PROMPT = """You are a crypto trading assistant.
-You will receive multiple symbols plus technical/news context.
+GROQ_BULK_SYSTEM_PROMPT = """You are a crypto market strategist focused on news flow and price action.
+You will receive multiple symbols with:
+- news and catalyst context,
+- raw price action structure,
+- nearby support/resistance zones,
+- Fibonacci retracement lines,
+- breakout or rejection state.
+
+Base your judgment on news plus price action only.
+Do NOT rely on indicator-style logic such as RSI, MACD, EMA, or ADX because the technical indicator engine is handled elsewhere.
+
+Prefer reasoning such as:
+- bullish news while price is reclaiming support or compressing under resistance,
+- bearish news while price is rejecting resistance or losing support,
+- whether price sits near fib support, fib resistance, swing high, or swing low,
+- whether the move looks like breakout continuation or exhaustion/rejection.
+
+Reasoning quality rules:
+- Do not use vague boilerplate such as "generic news" by itself.
+- If there is no meaningful asset-specific catalyst, explicitly say "no clear asset-specific catalyst" and then rely on price action.
+- Do not copy the same explanation across symbols. Mention the most decisive symbol-specific detail.
+- A short reason is good, but it must still say what is unique about that symbol.
+
+Score discipline is critical. Do not use extreme scores casually.
+- HOLD scores should usually stay between -4 and 4.
+- BUY or SELL scores should usually stay between 5 and 14 in absolute value.
+- STRONG_BUY or STRONG_SELL scores should usually stay between 15 and 18 in absolute value.
+- Scores from 19 to 24 are rare and must be reserved for exceptional conviction only.
+
+Use 19..24 only if ALL of the following are true:
+- there is a fresh and meaningful asset-specific catalyst,
+- price action clearly confirms it with breakout, breakdown, strong reclaim, or clear loss of a major level,
+- support/resistance or Fibonacci context strongly aligns with the catalyst,
+- confidence is high.
+
+Important guardrails:
+- Being near support or resistance alone is not enough for a strong score.
+- Compression, chop, or range behavior without confirmed breakout/breakdown should usually stay between HOLD and a mild directional bias.
+- Broad market or Bitcoin-led news must not be transferred aggressively to unrelated symbols unless that symbol's own price action confirms it.
+- Mixed evidence should stay near neutral.
+- If news is weak, stale, generic, or not asset-specific, avoid extreme scores.
+- HOLD should be used for balanced or unclear setups, not as the default answer for every low-news setup.
+- If price structure is clearly weak, mild SELL is acceptable even when the news is neutral.
+- If price structure is clearly constructive, mild BUY is acceptable even when the news is neutral.
+- Use the score bands flexibly. Do not collapse every HOLD to the same small negative score.
+- If two symbols have different conviction, their scores should usually differ.
+- Choose the score based on conviction intensity inside the band, not from a fixed per-stance default.
+
 Return ONLY a valid JSON array. Each item MUST follow this exact schema:
-{"symbol":"BTC/USDT","stance":"STRONG_BUY|BUY|HOLD|SELL|STRONG_SELL","score":-10,"confidence":0.0,"reasoning":"brief explanation"}
+{"symbol":"BTC/USDT","stance":"STRONG_BUY|BUY|HOLD|SELL|STRONG_SELL","score":0,"confidence":0.0,"reasoning":"brief explanation"}
 Do not wrap JSON in markdown. Do not add commentary. Do not omit symbols.
 """
 
@@ -183,6 +251,8 @@ class GroqProvider(BaseProvider):
                 primary_model,
                 _setting_str("groq_fallback_model"),
                 _setting_str("groq_fallback_fallback_model"),
+                _setting_str("groq_fallback_fallback_fallback_model"),
+                _setting_str("groq_fallback_fallback_fallback_fallback_model"),
             ]
         )
         self.model = self.models[0] if self.models else "llama-3.3-70b-versatile"
@@ -317,7 +387,9 @@ class GroqProvider(BaseProvider):
 
         context_text = build_symbol_research_context(symbol)
         user_prompt = f"""Analyze market sentiment for {symbol}.
-Consider technical state, recent price action, volume, and any supplied news or web research.
+Use only the supplied context.
+Do not invent support, resistance, price action, or breakout details unless they explicitly appear in the context.
+If there is no meaningful catalyst, say "no clear asset-specific catalyst".
 
 RESEARCH CONTEXT:
 {context_text or 'No external research context available.'}
@@ -328,7 +400,7 @@ RESEARCH CONTEXT:
                 {"role": "system", "content": GROQ_SINGLE_SYMBOL_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": 0.1,
+            "temperature": 0.2,
             "max_tokens": 220,
         }
 
@@ -467,7 +539,7 @@ def _normalize_stance(value: Any) -> str:
 
 def _normalize_score(value: Any, stance: str) -> int:
     score = _safe_int(value, STANCE_DEFAULT_SCORES.get(stance, 0))
-    return max(-10, min(10, score))
+    return max(AI_SCORE_MIN, min(AI_SCORE_MAX, score))
 
 
 def _normalize_confidence(value: Any) -> float:
@@ -851,6 +923,30 @@ def _compact_context_lines(lines: list[str], per_line_limit: int, total_limit: i
     return _compact_text(merged, total_limit)
 
 
+def _format_price_action_context(data: dict[str, Any]) -> str:
+    price_action = data.get("price_action", {}) if isinstance(data, dict) else {}
+    if not isinstance(price_action, dict) or not price_action:
+        return _compact_text(
+            f"price={data.get('price', 'N/A')}, volume={data.get('volume', 'N/A')}, change_24h={data.get('change_24h', 'N/A')}",
+            220,
+        )
+
+    return _compact_text(
+        (
+            f"price={data.get('price', 'N/A')}, change_24h={data.get('change_24h', 'N/A')}, volume={data.get('volume', 'N/A')}, "
+            f"structure={price_action.get('structure', 'N/A')}, breakout={price_action.get('breakout_state', 'N/A')}, "
+            f"support={_safe_float(price_action.get('recent_support'), 0.0):.6f}, resistance={_safe_float(price_action.get('recent_resistance'), 0.0):.6f}, "
+            f"swing_low={_safe_float(price_action.get('swing_low'), 0.0):.6f}, swing_high={_safe_float(price_action.get('swing_high'), 0.0):.6f}, "
+            f"nearest_support={price_action.get('nearest_support_label', 'N/A')}@{_safe_float(price_action.get('nearest_support_value'), 0.0):.6f}, "
+            f"nearest_resistance={price_action.get('nearest_resistance_label', 'N/A')}@{_safe_float(price_action.get('nearest_resistance_value'), 0.0):.6f}, "
+            f"fib_0.382={_safe_float(price_action.get('fib_0_382'), 0.0):.6f}, fib_0.500={_safe_float(price_action.get('fib_0_500'), 0.0):.6f}, "
+            f"fib_0.618={_safe_float(price_action.get('fib_0_618'), 0.0):.6f}, range_position={_safe_float(price_action.get('range_position'), 0.0):.3f}, "
+            f"last_close_change_pct={_safe_float(price_action.get('last_close_change_pct'), 0.0):.3f}"
+        ),
+        360,
+    )
+
+
 def build_symbol_research_context(symbol: str) -> str:
     canonical = _canonical_symbol(symbol)
     cached = _research_context_cache.get(canonical)
@@ -912,7 +1008,11 @@ def aggregate_rumor(symbol: str) -> dict[str, Any]:
                 )
             )
 
-    total_score = sum(x.rumor_score for x in items)
+    # TR: AI tarafi provider sayisi arttikca sismesin diye toplam degil ortalama kullaniyoruz.
+    # EN: We use the average instead of the sum so the AI side does not inflate when provider count grows.
+    # TR: Boylece rumor_total_score tek bir birlesik AI gorusu gibi davranir ve -24..24 bandinda kalir.
+    # EN: This keeps rumor_total_score behaving like one combined AI opinion inside the -24..24 range.
+    total_score = round(sum(x.rumor_score for x in items) / len(items), 2) if items else 0.0
     avg_conf = round(sum(x.confidence for x in items) / len(items), 4) if items else 0.0
     return {
         "symbol": symbol,
@@ -966,24 +1066,25 @@ def refresh_all_if_needed(
     per_symbol_context_limit = int(getattr(settings, "bulk_refresh_max_context_chars_per_symbol", 420) or 420)
     for sym in symbols:
         data = (market_data or {}).get(sym, {})
-        indicators = data.get("indicators", {}) if isinstance(data, dict) else {}
         symbol_lines = [f"SYMBOL={sym}"]
         if data:
             symbol_lines.append(
-                "TECH="
-                + _compact_text(
-                    f"price={data.get('price', 'N/A')}, volume={data.get('volume', 'N/A')}, change_24h={data.get('change_24h', 'N/A')}, "
-                    f"rsi={indicators.get('rsi', 'N/A')}, macd_cross={indicators.get('macd_cross', 'N/A')}, "
-                    f"ema_trend={indicators.get('ema_trend', 'N/A')}, adx={indicators.get('adx', 'N/A')}",
-                    220,
-                )
+                "PRICE_ACTION=" + _format_price_action_context(data)
             )
         research_context = build_symbol_research_context(sym)
-        symbol_lines.append(f"NEWS={_compact_text(research_context or 'none', 180)}")
+        symbol_lines.append(f"NEWS={_compact_text(research_context or 'none', 220)}")
         context_lines.append(_compact_context_lines(symbol_lines, per_line_limit=220, total_limit=per_symbol_context_limit))
 
     user_prompt = """Analyze each symbol below and return a JSON array with one item per symbol.
 Use only the supplied context. Keep reasoning very short.
+Mention news plus price action, support/resistance, or Fibonacci context in the reasoning when relevant.
+Do not say "generic news". If there is no real catalyst, say "no clear asset-specific catalyst".
+Do not reuse the same wording across symbols.
+Do not reuse the same score across symbols unless the conviction is genuinely almost identical.
+Stay conservative with scores unless there is clear asset-specific news plus confirmed price-action follow-through.
+If news is weak but structure is clearly weak, mild SELL is acceptable.
+If news is weak but structure is clearly constructive, mild BUY is acceptable.
+Range/compression without confirmation should usually stay between HOLD and a small directional lean, not a copy-paste neutral answer.
 
 """ + "\n\n".join(context_lines)
 
@@ -992,7 +1093,7 @@ Use only the supplied context. Keep reasoning very short.
             {"role": "system", "content": GROQ_BULK_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0.1,
+        "temperature": 0.2,
         "max_tokens": 1200,
     }
 

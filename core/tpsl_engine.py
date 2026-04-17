@@ -4,12 +4,21 @@ from __future__ import annotations
 TP/SL ENGINE
 ============
 
-Açık pozisyon varken stop-loss ve take-profit kararlarını üretir.
-Bu katman order göndermez; karar üretir. Gönderim main -> execution_engine zincirinde olur.
+TR:
+Acik pozisyon varken stop-loss ve take-profit kararlarini uretir.
+Bu katman order gondermez; karar uretir. Gonderim `main -> execution_engine` zincirinde olur.
 
-Tasarım prensibi:
-- Önce hayatta kal, sonra yeni entry düşün.
-Bu yüzden TP/SL kontrolü strategy signal yorumundan önce çalıştırılır.
+Tasarim prensibi:
+- Once hayatta kal, sonra yeni entry dusun.
+Bu yuzden TP/SL kontrolu strategy signal yorumundan once calistirilir.
+
+EN:
+Produces stop-loss and take-profit decisions while a position is open.
+This layer does not send orders; it only decides. Order submission happens through `main -> execution_engine`.
+
+Design principle:
+- Survive first, think about new entries second.
+That is why TP/SL is evaluated before strategy signals are acted on.
 """
 
 
@@ -19,29 +28,38 @@ from typing import Any
 
 class TPSLEngine:
     """
+    TR:
     TP/SL karar motoru.
+    Gorevi order gondermek degil, karar uretmektir.
 
-    Bu motorun görevi order göndermek değil, karar üretmektir.
-    Order gönderimi main.py -> ExecutionEngine zincirinde yapılır.
+    Urettigi kararlar:
+    - FULL_CLOSE
+    - PARTIAL_CLOSE
+    - triggered=False
 
-    Ürettiği kararlar:
-    - FULL_CLOSE   -> tam satış
-    - PARTIAL_CLOSE -> kısmi satış
-    - triggered=False -> hiçbir şey yapma
+    Bu sinifta iki kritik problem ozellikle ele alindi:
+    1. avg_entry_price yoksa TP/SL zorla calistirilmiyor.
+    2. Partial TP, order accepted oldugu anda tamam sayilmiyor;
+       gercekten qty dustu mu diye bakiliyor.
 
-    Bu sınıfta özellikle iki büyük problem çözüldü:
+    EN:
+    TP/SL decision engine.
+    Its job is not to send orders, but to produce decisions.
 
-    1. avg_entry_price yoksa TP/SL zorla çalıştırılmıyor.
-       Çünkü avg yokken TP/SL hesaplamak finansal olarak çöptür.
+    Main outputs:
+    - FULL_CLOSE
+    - PARTIAL_CLOSE
+    - triggered=False
 
-    2. Partial TP, order accepted olduğu anda "done" sayılmıyor.
-       Bu eski yaklaşım yanlıştı.
-       Doğru yaklaşım: gerçekten qty düşmüş mü, ona bak.
-       Çünkü order accepted -> fill oldu demek değildir.
+    Two important fixes are built into this class:
+    1. TP/SL is not forced when avg_entry_price is unknown.
+    2. Partial TP is not considered done just because an order was accepted;
+       it is considered done only when the real position quantity drops.
     """
 
     def __init__(self, settings, bot_state_repo):
-        # Ayarlar ve küçük runtime state burada kullanılır.
+        # TR: Ayarlar ve kucuk runtime state burada tutulur.
+        # EN: Settings and small runtime state dependencies are stored here.
         self.settings = settings
         self.bot_state_repo = bot_state_repo
 
@@ -49,7 +67,8 @@ class TPSLEngine:
         return int(time.time() * 1000)
 
     def _state_key(self, symbol: str) -> str:
-        # Her sembol için ayrı TP/SL state anahtarı.
+        # TR: Her sembol icin ayri TP/SL state anahtari.
+        # EN: Separate TP/SL state key for each symbol.
         return f"tpsl_state:{symbol}"
 
     def _default_state(self, position: dict) -> dict[str, Any]:
@@ -60,6 +79,8 @@ class TPSLEngine:
             "partial_tp_done": False,
             "last_avg_entry_price": float(position.get("avg_entry_price") or 0.0),
             "last_qty": float(position.get("qty") or 0.0),
+            "peak_price": float(position.get("avg_entry_price") or 0.0),
+            "peak_pnl_pct": 0.0,
             "updated_at_ms": self.now_ms(),
         }
 
@@ -108,14 +129,15 @@ class TPSLEngine:
         qty_decreased = qty < prev_qty - 1e-12
         avg_changed = prev_avg > 0 and avg > 0 and abs(avg - prev_avg) / max(prev_avg, 1e-12) > 1e-9
 
-        # Scale-in veya yeni maliyet fazı başladıysa partial TP tekrar kullanılabilir olmalı.
+        # TR: Scale-in veya yeni maliyet fazi basladiysa partial TP hakki yeniden acilmali.
+        # EN: If a scale-in or a new cost phase starts, partial TP should become available again.
         if qty_increased or avg_changed:
             state["partial_tp_done"] = False
 
-        # Eski hata:
-        # "partial order gönderdim, done oldu" demekti.
-        # Doğrusu:
-        # gerçekten qty azaldıysa done kabul et.
+        # TR: Eski hata "partial order gonderdim, tamamlandi" varsayimiydi.
+        # EN: The old mistake was assuming "partial order submitted" meant "partial TP completed".
+        # TR: Dogru kural gercek qty dususune bakmaktir.
+        # EN: The correct rule is to look at real quantity reduction.
         if qty_decreased and qty > 1e-12:
             state["partial_tp_done"] = True
 
@@ -125,7 +147,13 @@ class TPSLEngine:
         self.bot_state_repo.set(key, state, self.now_ms())
         return state
 
-    def evaluate(self, symbol: str, position: dict | None, last_price: float) -> dict[str, Any]:
+    def evaluate(
+        self,
+        symbol: str,
+        position: dict | None,
+        last_price: float,
+        high_price: float | None = None,
+    ) -> dict[str, Any]:
         """
         Son fiyat ve mevcut pozisyona göre TP/SL kararı üretir.
 
@@ -147,6 +175,10 @@ class TPSLEngine:
             "partial_take_profit_price": None,
             "full_take_profit_price": None,
             "pnl_pct": None,
+            "peak_price": None,
+            "peak_pnl_pct": None,
+            "break_even_stop_price": None,
+            "trailing_retrace_pct": None,
             "state": None,
         }
 
@@ -180,29 +212,68 @@ class TPSLEngine:
         stop_loss_pct = float(self.settings.stop_loss_pct)
         partial_take_profit_pct = float(self.settings.partial_take_profit_pct)
         full_take_profit_pct = float(self.settings.full_take_profit_pct)
+        break_even_enabled = bool(getattr(self.settings, "break_even_stop_enabled", True))
+        break_even_activation_pct = float(getattr(self.settings, "break_even_activation_pct", 0.03))
+        break_even_buffer_pct = float(getattr(self.settings, "break_even_buffer_pct", 0.002))
+        trailing_enabled = bool(getattr(self.settings, "trailing_take_profit_enabled", True))
+        trailing_activation_pct = float(getattr(self.settings, "trailing_take_profit_activation_pct", 0.05))
+        trailing_giveback_pct = float(getattr(self.settings, "trailing_take_profit_giveback_pct", 0.02))
 
         stop_loss_price = avg * (1.0 - stop_loss_pct)
         partial_take_profit_price = avg * (1.0 + partial_take_profit_pct)
         full_take_profit_price = avg * (1.0 + full_take_profit_pct)
         pnl_pct = (last_price / avg) - 1.0
+        trigger_high_price = max(float(high_price or 0.0), last_price)
+        break_even_stop_price = avg * (1.0 + break_even_buffer_pct)
+
+        peak_price = max(
+            float((state or {}).get("peak_price") or 0.0),
+            trigger_high_price,
+            avg,
+        )
+        peak_pnl_pct = (peak_price / avg) - 1.0
+        trailing_retrace_pct = 0.0
+        if peak_price > 0:
+            trailing_retrace_pct = max(0.0, 1.0 - (last_price / peak_price))
+
+        if state is not None:
+            state["peak_price"] = peak_price
+            state["peak_pnl_pct"] = peak_pnl_pct
+            state["updated_at_ms"] = self.now_ms()
+            self.bot_state_repo.set(self._state_key(symbol), state, self.now_ms())
 
         result["stop_loss_price"] = stop_loss_price
         result["partial_take_profit_price"] = partial_take_profit_price
         result["full_take_profit_price"] = full_take_profit_price
         result["pnl_pct"] = pnl_pct
+        result["peak_price"] = peak_price
+        result["peak_pnl_pct"] = peak_pnl_pct
+        result["break_even_stop_price"] = break_even_stop_price
+        result["trailing_retrace_pct"] = trailing_retrace_pct
 
-        # SL ilk sırada. Çünkü zarar kontrolü kâr kovalamaktan önce gelir.
+        # TR: SL ilk sirada cunku zarar kontrolu kar kovalamaktan once gelir.
+        # EN: SL comes first because loss control comes before profit chasing.
         if stop_loss_pct > 0 and last_price <= stop_loss_price:
             result["triggered"] = True
             result["action"] = "FULL_CLOSE"
             result["reason"] = "stop_loss_hit"
             return result
 
-        # Full TP, partial'dan önce bakılıyor.
-        # Sebep:
-        # fiyat bir anda full TP seviyesine geldiyse gereksiz partial ile oyalamıyoruz.
+        # TR: Pozisyon guzel kara girdikten sonra tekrar eksiye donmesine izin vermiyoruz.
+        # EN: Once the trade moved nicely into profit, we do not want to let it fall back into loss.
+        if break_even_enabled and break_even_activation_pct > 0:
+            if peak_pnl_pct >= break_even_activation_pct and last_price <= break_even_stop_price:
+                result["triggered"] = True
+                result["action"] = "FULL_CLOSE"
+                result["reason"] = "break_even_stop_hit"
+                return result
+
+        # TR: Full TP, partial'dan once kontrol edilir.
+        # EN: Full TP is checked before partial TP.
+        # TR: Fiyat bir anda full TP'ye degdiyse gereksiz partial ile vakit kaybetmeyiz.
+        # EN: If price instantly reaches the full TP level, we do not waste time with a partial exit first.
         if bool(getattr(self.settings, "full_take_profit_enabled", True)):
-            if full_take_profit_pct > 0 and last_price >= full_take_profit_price:
+            if full_take_profit_pct > 0 and trigger_high_price >= full_take_profit_price:
                 result["triggered"] = True
                 result["action"] = "FULL_CLOSE"
                 result["reason"] = "full_take_profit_hit"
@@ -210,10 +281,21 @@ class TPSLEngine:
 
         partial_tp_done = bool((state or {}).get("partial_tp_done", False))
         if bool(getattr(self.settings, "partial_take_profit_enabled", True)):
-            if partial_take_profit_pct > 0 and not partial_tp_done and last_price >= partial_take_profit_price:
+            if partial_take_profit_pct > 0 and not partial_tp_done and trigger_high_price >= partial_take_profit_price:
                 result["triggered"] = True
                 result["action"] = "PARTIAL_CLOSE"
                 result["reason"] = "partial_take_profit_hit"
+                return result
+
+        # TR: Trailing TP, spike sonrasi rollback durumunda kari kilitlemek icin vardir.
+        # EN: Trailing TP exists to lock profit after a spike rolls back.
+        # TR: Once iyi bir peak, sonra anlamli geri verme gorulmelidir.
+        # EN: First we need a meaningful peak, then a meaningful giveback from that peak.
+        if trailing_enabled and trailing_activation_pct > 0 and trailing_giveback_pct > 0:
+            if peak_pnl_pct >= trailing_activation_pct and trailing_retrace_pct >= trailing_giveback_pct:
+                result["triggered"] = True
+                result["action"] = "FULL_CLOSE" if partial_tp_done else "PARTIAL_CLOSE"
+                result["reason"] = "trailing_take_profit_hit"
                 return result
 
         return result

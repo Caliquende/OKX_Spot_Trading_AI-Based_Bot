@@ -1,126 +1,139 @@
 # OKX Spot Trading Bot
 
-[Türkçe README](./README_TR.md)
+[Turkish README / Turkce README](./README_TR.md)
 
-A modular spot trading bot for OKX built around technical signals, market regime detection, risk controls, TP/SL logic, Telegram monitoring, and an optional AI research layer.
+A modular OKX spot trading bot built around technical signals, market regime detection, deterministic execution controls, risk controls, TP/SL logic, Telegram monitoring, and an optional AI research layer.
+
 Legal Disclaimer: Systems used in live markets carry financial risk.
 
-## Status
+## Current Status
 
-This repository is a **working alpha**.
-It is suitable for study, testing, and iterative development. It is **not** presented as a guaranteed production-grade trading system.
+This repository is a working alpha focused on:
+- learning,
+- testing,
+- iterative development,
+- strategy tuning.
 
-## What the Bot Does
+It is not presented as a guaranteed production-grade system.
+
+## What The Bot Does
 
 On each cycle, the bot broadly does the following:
 
 1. Checks exchange and database health.
 2. Fetches OHLCV data for each symbol.
 3. Calculates technical indicators.
-4. Refreshes research and sentiment context when needed.
-5. Detects market regime.
-6. Produces a combined score.
-7. Applies TP/SL, risk, and execution gates.
-8. Sends orders when conditions allow.
-9. Reconciles order, fill, and position state.
+4. Refreshes AI research context when TTL expires.
+5. Detects market regime such as TREND, RANGE, CHOP, or VOLATILE.
+6. Builds a technical score and an AI score.
+7. Produces a combined score using the average of technical and AI scores.
+8. Applies TP/SL, risk, lock, and execution gates.
+9. Reconciles orders, fills, and positions back into SQLite state.
 
-## Architecture Overview
+## What Changed Recently
 
-### Main runtime flow
+The current version reflects the latest strategy work:
 
-- `main.py` orchestrates the main loop.
-- `core/` contains exchange, execution, reconcile, risk, TP/SL, health, and portfolio engines.
-- `strategy/` contains signal mapping and market regime logic.
-- `indicators/` generates technical indicators.
-- `analysis/` contains CoinGecko, Exa, and LLM-based research logic.
+- Spot position quantity now follows exchange balance as the main source of truth.
+- Fill history is mainly used for average entry and realized PnL.
+- Ghost order cleanup is less noisy and state-aware.
+- AI model fallback chain is configurable from `.env`.
+- AI refresh TTL is configurable from `.env`.
+- AI score band is now `-24 .. 24`.
+- Default AI stance fallback scores are now:
+  - `SELL = -8`
+  - `STRONG_SELL = -16`
+  - `BUY = 8`
+  - `STRONG_BUY = 16`
+- Combined score is now:
+  - `(technical_score + ai_score) / 2`
+- TP/SL logic now includes:
+  - candle-high-aware take profit detection,
+  - break-even stop logic,
+  - trailing take-profit rollback protection.
+
+## Architecture
+
+### Main flow
+
+- `main.py` orchestrates the runtime loop.
+- `core/` contains exchange, execution, reconcile, risk, TP/SL, portfolio, and health logic.
+- `strategy/` contains signal mapping and regime logic.
+- `indicators/` builds technical indicators.
+- `analysis/` contains CoinGecko, Exa, and Groq-based AI research.
 - `db/` stores persistent state and accounting data.
-- `reporting/` handles Telegram notifications.
+- `reporting/` handles Telegram messaging.
 
-### Key design idea
+### Design principle
 
-The bot is **AI-based in research and signal shaping**, but **execution safety is deterministic**.
+The bot is AI-assisted in research and score shaping, but execution safety is deterministic.
 
-In practice, this means:
-- the AI layer can influence sentiment and threshold behavior,
-- while execution, locking, reconciliation, and order/accounting logic should remain strict and auditable.
+That means:
+- AI can influence sentiment and thresholds,
+- but order submission, locks, reconciliation, and accounting should remain strict and auditable.
 
 ## Core Components
 
 ### Exchange layer
 
-`core/exchange.py` communicates with OKX through ccxt. The rest of the system should not depend on raw OKX responses directly.
+`core/exchange.py` talks to OKX through ccxt.
 
 ### Execution layer
 
-`core/execution_engine.py` applies decisions. It does not decide **what** to trade; it decides **how** to submit and manage orders safely.
+`core/execution_engine.py` applies already-made decisions safely.
 
 ### Reconcile layer
 
 `core/reconciler.py` is one of the most sensitive parts of the project.
-Its main responsibilities are:
-- syncing order states,
-- writing executed trades into `fills`,
-- rebuilding current position state.
 
-For spot trading, the practical rule is:
-- **exchange balance** is the primary source for current open quantity,
-- **fill history** is mainly used for average entry and realized PnL.
+Its main jobs are:
+- sync order state,
+- write fills into the database,
+- rebuild current positions,
+- keep bot accounting aligned with exchange state.
+
+For spot trading, the current practical rule is:
+- exchange balance decides open quantity,
+- fills support accounting details such as average entry and realized PnL.
 
 ### Strategy layer
 
-- `strategy/scoring_engine.py`: technical score to action mapping
-- `strategy/regime_engine.py`: market regime detection such as TREND or RANGE
-
-### Risk layer
-
-`core/risk_engine.py` controls limits such as:
-- total exposure,
-- per-symbol exposure,
-- single-trade size,
-- scale-in constraints.
+- `strategy/scoring_engine.py`: maps score to action
+- `strategy/regime_engine.py`: detects market regime
 
 ### TP/SL layer
 
-`core/tpsl_engine.py` produces stop-loss and take-profit decisions such as `PARTIAL_CLOSE` or `FULL_CLOSE`. It does not submit orders itself.
+`core/tpsl_engine.py` now protects profits more aggressively with:
+- stop loss,
+- partial take profit,
+- full take profit,
+- break-even stop,
+- trailing rollback protection.
 
-### Research / LLM layer
+### Research layer
 
 `analysis/rumor_analyzer.py` can use:
 - CoinGecko news,
-- Exa web search,
-- Groq with fallback model chaining.
+- Exa search,
+- Groq AI with multi-step model fallback.
 
-This layer adds research context on top of the technical score.
+## Database
 
-## Database Model
-
-The project uses SQLite.
+SQLite is used.
 
 Main table roles:
 - `orders`: submitted order records
 - `fills`: executed trade rows
 - `positions`: current summarized position state
 - `symbol_locks`: cooldown and lock state
-- `bot_state`: small persistent state such as streaks, regime data, and pending exit metadata
+- `bot_state`: small persistent state such as streaks, pending exit reasons, regime state, and TP/SL state
 - `cycle_reports`: cycle summaries
 
-## Setup
+## Environment Configuration
 
-### 1. Prepare Python
+The project reads `.env` and `_.env`.
 
-Use a virtual environment if possible.
-
-Example starter dependencies:
-
-```bash
-pip install ccxt pandas pandas-ta-classic requests python-dotenv
-```
-
-### 2. Prepare `.env`
-
-The project can read `.env` and `_.env`.
-
-Minimum required fields:
+### Minimum required fields
 
 ```env
 OKX_API_KEY=your_key
@@ -136,26 +149,55 @@ LOOP_SECONDS=60
 DB_PATH=trading_bot.db
 ```
 
-Optional AI/research example:
+### AI / research example
 
 ```env
 LLM_ENABLED=true
 GROQ_API_KEY=your_groq_key
+
 GROQ_MODEL=groq/compound
 GROQ_FALLBACK_MODEL=openai/gpt-oss-120b
 GROQ_FALLBACK_FALLBACK_MODEL=llama-3.3-70b-versatile
+GROQ_FALLBACK_FALLBACK_FALLBACK_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+GROQ_FALLBACK_FALLBACK_FALLBACK_FALLBACK_MODEL=llama-3.1-8b-instant
+
+GROQ_CACHE_TTL_SECONDS=7200
+THRESHOLD_UPDATE_TTL_SECONDS=7200
+
 EXA_API_KEY=your_exa_key
 COINGECKO_DEMO_API_KEY=your_demo_key
 ```
 
-Optional Telegram example:
+### TP/SL example
 
 ```env
-TELEGRAM_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
+TPSL_ENABLED=true
+STOP_LOSS_PCT=0.06
+PARTIAL_TAKE_PROFIT_ENABLED=true
+PARTIAL_TAKE_PROFIT_PCT=0.04
+FULL_TAKE_PROFIT_ENABLED=true
+FULL_TAKE_PROFIT_PCT=0.08
+
+BREAK_EVEN_STOP_ENABLED=true
+BREAK_EVEN_ACTIVATION_PCT=0.03
+BREAK_EVEN_BUFFER_PCT=0.002
+
+TRAILING_TAKE_PROFIT_ENABLED=true
+TRAILING_TAKE_PROFIT_ACTIVATION_PCT=0.05
+TRAILING_TAKE_PROFIT_GIVEBACK_PCT=0.02
 ```
 
-### 3. Run
+### Daily risk guard example
+
+Set either value above `0` to activate the automatic entry block.
+When triggered, the bot blocks new entries and scale-ins, but exits still remain allowed.
+
+```env
+MAX_DAILY_REALIZED_LOSS_USDT=100
+MAX_DAILY_DRAWDOWN_PCT=0.08
+```
+
+## Run
 
 ```bash
 python main.py
@@ -163,11 +205,11 @@ python main.py
 
 After startup:
 - runtime logs are written under `logs/`
-- the SQLite database is created at `DB_PATH`
+- the SQLite database is created under `DB_PATH`
 
-## Recommended First Start
+## Recommended Safe Start
 
-For an initial test:
+For a first run:
 
 ```env
 OKX_SANDBOX=true
@@ -176,13 +218,13 @@ LLM_ENABLED=false
 ```
 
 Meaning:
-- use sandbox instead of a real account,
-- do not place real orders,
-- test execution and reconcile behavior first.
+- use sandbox,
+- do not send real orders,
+- validate execution and reconcile behavior first.
 
-## Important Configuration Areas
+## Important Config Areas
 
-### Trade and risk
+### Risk and sizing
 
 - `MIN_ORDER_QUOTE_USDT`
 - `MIN_FREE_USDT`
@@ -190,8 +232,10 @@ Meaning:
 - `MAX_SYMBOL_EXPOSURE_PCT`
 - `MAX_TOTAL_EXPOSURE_PCT`
 - `MAX_SINGLE_TRADE_PCT`
+- `MAX_DAILY_REALIZED_LOSS_USDT`
+- `MAX_DAILY_DRAWDOWN_PCT`
 
-### Signal thresholds
+### Thresholds
 
 - `BUY_THRESHOLD`
 - `STRONG_BUY_THRESHOLD`
@@ -207,31 +251,26 @@ Meaning:
 
 ### TP/SL
 
-- `TPSL_ENABLED`
 - `STOP_LOSS_PCT`
 - `PARTIAL_TAKE_PROFIT_PCT`
 - `FULL_TAKE_PROFIT_PCT`
+- `BREAK_EVEN_ACTIVATION_PCT`
+- `TRAILING_TAKE_PROFIT_ACTIVATION_PCT`
+- `TRAILING_TAKE_PROFIT_GIVEBACK_PCT`
 
-### Reconcile
+### AI
 
-- `POSITION_SOURCE_MODE`
-- `MIN_POSITION_VALUE_USDT`
-- `RECONCILE_WARN_ABS_QUOTE_USDT`
-- `RECONCILE_WARN_RATIO`
-- `LIVE_FORCE_CLOSE_ON_ZERO_BALANCE`
-
-### AI / research
-
-- `LLM_ENABLED`
 - `GROQ_MODEL`
 - `GROQ_FALLBACK_MODEL`
 - `GROQ_FALLBACK_FALLBACK_MODEL`
-- `EXA_API_KEY`
-- `COINGECKO_DEMO_API_KEY`
+- `GROQ_FALLBACK_FALLBACK_FALLBACK_MODEL`
+- `GROQ_FALLBACK_FALLBACK_FALLBACK_FALLBACK_MODEL`
+- `GROQ_CACHE_TTL_SECONDS`
+- `THRESHOLD_UPDATE_TTL_SECONDS`
 
-## Logs to Watch
+## Logs To Watch
 
-Key log families:
+Key logs:
 - `[RECON]`
 - `[POSITION]`
 - `[POSITION MISMATCH]`
@@ -245,43 +284,25 @@ Important files:
 - `logs/bot.log`
 - `logs/okx_debug.log`
 
-## Telegram Commands
+## Recommended Reading Order
 
-Command parsing lives in `main.py`.
-Telegram transport lives in `reporting/telegram_bot.py`.
-
-This README is intentionally high level. For the authoritative command list, check the slash-command handling blocks in `main.py`.
-
-## Reading Order
-
-If you want to understand the project quickly, read in this order:
-
-1. `README_EN.md`
-2. `main.py`
-3. `core/reconciler.py`
-4. `core/execution_engine.py`
-5. `strategy/scoring_engine.py`
-6. `strategy/regime_engine.py`
+1. `README.md`
+2. `README_TR.md`
+3. `main.py`
+4. `core/reconciler.py`
+5. `core/tpsl_engine.py`
+6. `strategy/scoring_engine.py`
 7. `analysis/rumor_analyzer.py`
 8. `db/database.py`
 9. `db/repositories.py`
 
-## Design Notes
-
-- This bot is focused on **spot trading**.
-- Reconcile and position accounting are the most fragile layers.
-- The `positions` table stores current summary state, not full history.
-- The `fills` table is the accounting history.
-- The AI layer can shape decisions, but execution safety must remain deterministic.
-
 ## Safety Warning
+
+This project can place orders.
 
 Before using a real account:
 - test in sandbox,
-- observe at least a few cycles with `DRY_RUN=true`,
-- start with conservative limits,
-- read `bot.log` carefully,
+- observe multiple cycles in `DRY_RUN=true`,
+- start with conservative exposure,
+- read `bot.log`,
 - verify reconcile behavior before trusting live capital.
-
-This project can place orders.
-A wrong `.env` configuration can cause real financial loss.
