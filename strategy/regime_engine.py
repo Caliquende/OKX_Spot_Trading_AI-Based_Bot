@@ -117,10 +117,9 @@ def detect_market_regime(df, settings, current_regime: str = "BASE") -> tuple[st
         ema20_slope_ratio = _safe_ratio(last_ema20 - first_ema20, close)
 
         ema_diff = (window["ema20"] - window["ema50"]).astype(float)
-        if len(ema_diff) > 0:
-            sign = 1 if ema20 >= ema50 else -1
-            aligned = (ema_diff * sign) > 0
-            trend_persistence = float(aligned.mean())
+        sign = 1 if ema20 >= ema50 else -1
+        aligned = (ema_diff * sign) > 0
+        trend_persistence = float(aligned.mean())
 
     trend_bias = "UP" if dmp >= dmn else "DOWN"
 
