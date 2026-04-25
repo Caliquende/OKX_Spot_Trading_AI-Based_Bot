@@ -1,61 +1,79 @@
-# OKX Spot Trading Bot
+# OKX Spot Trading Bot - Teknik Kılavuz
 
-OKX borsası için geliştirilmiş, teknik sinyal işleme ve risk yönetimi özelliklerine sahip modüler trading botu.
+## Genel Bakış
+Teknik göstergeler, market rejimi tespiti ve deterministik execution (emir yürütme) prensiplerine dayalı modüler OKX spot trading botu. Sistem mimarisi, muhasebe bütünlüğü ve risk yönetimi tarafında yüksek denetlenebilirlik hedeflenerek tasarlanmıştır.
 
-## Proje Yapısı
+## Proje Yapısı ve Modül Fonksiyonları
 
-- `main.py`: Ana yürütme döngüsü ve koordinasyon.
-- `core/`: Temel ticaret mantığı.
-    - `exchange.py`: CCXT üzerinden OKX API entegrasyonu.
-    - `execution_engine.py`: Emir iletimi ve soğuma (cooldown) yönetimi.
-    - `reconciler.py`: Muhasebe, gerçekleşen emirlerin kaydı ve pozisyon senkronizasyonu.
-    - `tpsl_engine.py`: Kar al (TP) ve zarar durdur (SL) yönetimi.
-    - `risk_manager.py`: Pozisyon limitleri ve düşüş (drawdown) koruması.
-- `strategy/`: Strateji ve skorlama bileşenleri.
-    - `scoring_engine.py`: Sinyal-aksiyon eşleşmesi.
-    - `regime_engine.py`: Market rejimi tespiti (Trend, Yatay, Volatil).
-- `indicators/`: Teknik gösterge hesaplamaları.
-- `db/`: Veritabanı katmanı ve repolar.
-    - `database.py`: SQLite bağlantı ve şema yönetimi.
-    - `repositories.py`: Emir, fill ve pozisyon verilerine erişim.
-- `analysis/`: AI araştırma ve market analizi (isteğe bağlı LLM entegrasyonu).
-- `reporting/`: Telegram ve konsol raporlama kayıtları.
-- `scratch/`: Mantıksal doğrulama için kullanılan test paketleri.
+### 1. Yürütme ve Orkestrasyon (`/`)
+- `main.py`: Giriş noktası. Sonsuz ticaret döngüsünü yönetir, cycle zamanlamasını koordine eder ve global istisnaları (exception) yakalar.
+- `desktop_app.py`: Bot durumunu ve logları izlemek için kullanılan isteğe bağlı grafik arayüz (GUI).
 
-## Temel Özellikler
+### 2. Çekirdek Ticaret Mantığı (`core/`)
+- `exchange.py`: OKX için düşük seviyeli CCXT wrapper katmanı. Özel/genel API çağrılarını, sayfalandırmayı (pagination) ve hata normalizasyonunu yönetir.
+- `execution_engine.py`: Atomik emir iletim katmanı. Client Order ID'lerini, soğuma kilitlerini (cooldown locks) ve dry-run simülasyonlarını yönetir. %100 branch coverage ile doğrulanmıştır.
+- `reconciler.py`: Muhasebe çekirdeği. Yerel state'i borsa bakiyeleri ve gerçekleşen emirler (fills) ile senkronize eder. Ortalama giriş fiyatını ve gerçekleşen kâr/zararı (PnL) yeniden hesaplar. 843 satırdan 167 satıra indirilerek sadeleştirilmiştir.
+- `tpsl_engine.py`: Çok aşamalı çıkış yönetimi. Zarar Durdur (SL), Kısmi TP, Tam TP, Başabaş (Break-Even) ve Trailing tetikleyicileri için canlı fiyatları izler.
+- `risk_manager.py`: Günlük maksimum zarar ve drawdown korumaları. Eşik değerler aşıldığında yeni girişleri engeller.
+- `portfolio_manager.py`: Toplam maruziyeti (exposure) ve varlık dağılımını hesaplar.
 
-- **Yenilenmiş Reconciler:** Pozisyon takibi için sadeleştirilmiş muhasebe mantığı.
-- **Deterministik İşlem:** Sıkı emir yönetimi ve hata yakalama.
-- **Dinamik Rejim Tespiti:** Market koşullarına göre strateji adaptasyonu.
-- **Çok Katmanlı TP/SL:** Zarar durdur, kısmi kar al, başabaş ve trailing koruması.
+### 3. Strateji ve İndikatörler (`strategy/`, `indicators/`)
+- `scoring_engine.py`: Teknik ve AI skorlarını birleştirerek AL/SAT/BEKLE kararları üretir.
+- `regime_engine.py`: Fiyat hareketlerini analiz ederek Trend, Yatay (Range) veya Volatil rejimlerini tespit eder.
+- `technical_indicators.py`: RSI, MACD, Bollinger Bantları vb. için özel veya kütüphane tabanlı hesaplamalar.
 
-## Yapılandırma (.env)
+### 4. Analiz ve Yapay Zeka (`analysis/`)
+- `rumor_analyzer.py`: Haber ve duygu analizi için Exa, CoinGecko ve Groq entegrasyonu.
+- `model_bridge.py`: LLM fallback zincirlerini yönetir (Örn: Groq hatasında OpenAI veya Llama modellerine geçiş).
 
-| Değişken | Açıklama |
-| :--- | :--- |
-| `OKX_API_KEY` | Borsa API Anahtarı |
-| `SYMBOLS` | İşlem görecek pariteler (Örn: BTC/USDT) |
-| `DRY_RUN` | True ise emirler simüle edilir |
-| `TPSL_ENABLED` | TP/SL yönetimini etkinleştirir |
-| `STOP_LOSS_PCT` | Zarar durdurma yüzdesi |
-| `MAX_OPEN_POSITIONS` | Maksimum eşzamanlı işlem sayısı |
+### 5. Veri Kalıcılığı (`db/`)
+- `database.py`: SQLite ilkleme, şema migrasyonları ve bağlantı yönetimi.
+- `repositories.py`: Veri erişim nesneleri:
+    - `OrdersRepo`: Durum takibi ve hayalet emir (ghost order) temizliği.
+    - `FillsRepo`: İşlem geçmişi ve kâr/zarar toplamları.
+    - `PositionsRepo`: Güncel açık pozisyon özetleri.
+    - `LocksRepo`: Sembol bazlı geçici işlem kilitleri.
+    - `BotStateRepo`: Streak ve rejim state'i için anahtar-değer depolama.
 
-## Test ve Doğrulama
+## Yapılandırma Parametreleri (.env)
 
-Proje, branch coverage analizi içeren birim ve entegrasyon testlerine sahiptir.
+### Risk Yönetimi
+- `MAX_OPEN_POSITIONS`: Maksimum eşzamanlı sembol sayısı.
+- `MAX_SYMBOL_EXPOSURE_PCT`: Bir sembole ayrılan maksimum sermaye yüzdesi.
+- `MAX_DAILY_REALIZED_LOSS_USDT`: Günlük zarar limiti (yeni girişleri durdurur).
+- `MAX_DAILY_DRAWDOWN_PCT`: Sermaye bazlı drawdown limiti.
 
-### Testlerin Çalıştırılması
+### TP/SL Yapılandırması
+- `STOP_LOSS_PCT`: Ortalama girişten itibaren sabit zarar durdurma yüzdesi.
+- `PARTIAL_TAKE_PROFIT_PCT`: %50 çıkışı tetikleyen kâr seviyesi.
+- `FULL_TAKE_PROFIT_PCT`: Tam çıkışı tetikleyen kâr seviyesi.
+- `BREAK_EVEN_STOP_ENABLED`: Kâr belirli bir noktaya ulaştığında SL'i giriş fiyatına çeker.
+- `TRAILING_TAKE_PROFIT_ENABLED`: Takip eden kâr al mantığını etkinleştirir.
+
+## Veritabanı Şema Detayları
+
+- **orders**: `client_order_id`, `status` (PENDING, OPEN, FILLED, CANCELED), `qty`, `created_at_ms`.
+- **fills**: `trade_id`, `order_id`, `qty`, `price`, `realized_pnl_quote`, `exit_reason`.
+- **positions**: `symbol`, `qty`, `avg_entry_price`, `realized_pnl_quote`, `status`.
+
+## Test Metodolojisi
+
+Sistem, mantıksal doğrulama için `pytest` ve `pytest-cov` kullanır.
+
+### `scratch/` İçindeki Test Senaryoları:
+- **Repositories:** Disk yan etkisi olmadan SQL bütünlüğünü test etmek için bellek içi SQLite (`:memory:`) kullanır.
+- **Execution Engine:** Borsa hata senaryolarını test etmek için mock exchange yanıtları kullanılır.
+- **Reconciler:** Borsa bakiyesi ile yerel veritabanı arasındaki "Uyumsuzluk" senaryoları simüle edilir.
+
+### Komut
 ```bash
 $env:PYTHONPATH="."
-pytest scratch/ --cov-branch --cov-report=term-missing
+pytest scratch/ -vv --cov-branch --cov-report=term-missing
 ```
 
-### Kapsama Durumu
-- `strategy/regime_engine.py`: %100 Branch Coverage
-- `core/execution_engine.py`: %100 Branch Coverage
-- `core/tpsl_engine.py`: %96 Branch Coverage
-- `db/repositories.py`: %90 Branch Coverage
-- `core/reconciler.py`: %90 Branch Coverage
-
-## Güvenlik Notu
-Konfigürasyonları Sandbox modunda test edin ve canlı sermaye kullanmadan önce sistemi `DRY_RUN=true` modunda gözlemleyin.
+### Doğrulanmış Kapsama Oranları
+- `regime_engine.py`: %100 Branch
+- `execution_engine.py`: %100 Branch
+- `tpsl_engine.py`: %96 Branch
+- `repositories.py`: %90 Branch
+- `reconciler.py`: %90 Branch
