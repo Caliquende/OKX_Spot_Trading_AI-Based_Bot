@@ -2,259 +2,262 @@
 
 [English README](./README.md)
 
-OKX spot piyasası için hazırlanmış; teknik sinyaller, market rejimi, deterministik execution kontrolleri, risk kontrolleri, TP/SL mantığı, Telegram takibi ve isteğe bağlı AI araştırma katmanını birleştiren modüler bir trading bot.
+Bu repo, OKX spot piyasası için geliştirilmiş modüler bir Python trading botudur. Bot; teknik indikatörler, market rejimi tespiti, deterministik risk ve execution kontrolleri, TP/SL mantığı, SQLite tabanlı state takibi, Telegram bildirimleri ve isteğe bağlı AI destekli research katmanını birlikte kullanır.
 
-Yasal Uyarı: Gerçek piyasalarda kullanılan bu tür sistemler finansal risk içerir.
+Bu proje canlı emir gönderebilir. Canlı hesapta kullanmadan önce `OKX_SANDBOX=true` ve `DRY_RUN=true` ile test etmek gerekir.
 
-## Güncel Durum
+## Proje Amacı
 
-Bu repo çalışan bir alpha sürümdür.
+Kod tabanındaki mevcut yapıya göre botun ana amacı şudur:
 
-**Mantıksal Doğrulama Durumu:**
-- `strategy/regime_engine.py`: **%100 Branch Coverage**
-- `core/execution_engine.py`: **%100 Branch Coverage**
-- `core/tpsl_engine.py`: **%96 Branch Coverage**
-- `db/repositories.py`: **%90 Branch Coverage**
-- `core/reconciler.py`: **%90 Branch Coverage** (Yenilenmiş mimari)
+- OKX spot sembollerini periyodik olarak taramak
+- Teknik skor ve AI skorunu birleştirerek karar üretmek
+- Risk, cooldown, exposure ve günlük kayıp guard'larıyla emir kararını filtrelemek
+- Pozisyon, order, fill ve cycle state'ini SQLite içinde kalıcı tutmak
+- Telegram ve masaüstü arayüz üzerinden operasyonel görünürlük sağlamak
 
-Ana kullanım alanı:
-- öğrenme,
-- test,
-- iteratif geliştirme,
-- strateji ayarı.
+`main.py` içindeki akış ve `config/settings.py` içindeki ayarlar, sistemin production dağıtımdan çok kontrollü test, iteratif geliştirme ve strateji ayarı odaklı olduğunu gösteriyor. Repo içinde production deployment otomasyonu veya paketlenmiş dağıtım akışı görünmüyor.
 
-Kusursuz production-grade sistem olarak sunulmaz.
+## Öne Çıkan Bileşenler
 
-## Bot Ne Yapar?
+- Teknik analiz: `indicators/indicator_engine.py`
+- Rejim tespiti: `strategy/regime_engine.py`
+- Sinyal ve skor eşleme: `strategy/scoring_engine.py`
+- Exchange erişimi: `core/exchange.py`
+- Emir yürütme: `core/execution_engine.py`
+- Risk kontrolleri: `core/risk_engine.py`
+- TP/SL motoru: `core/tpsl_engine.py`
+- Reconcile ve pozisyon doğrulama: `core/reconciler.py`
+- AI / dış haber analizi: `analysis/rumor_analyzer.py`
+- Kalıcı state ve muhasebe: `db/database.py`, `db/repositories.py`
+- Telegram bildirimleri: `reporting/telegram_bot.py`
+- Masaüstü kontrol paneli: `desktop_app.py`
 
-Her cycle'da kabaca şunları yapar:
+## Repo Yapısı
 
-1. Exchange ve veritabanı sağlığını kontrol eder.
-2. Her sembol için OHLCV verisi çeker.
-3. Teknik indikatörleri hesaplar.
-4. TTL dolduysa AI research context'i yeniler.
-5. Market rejimini TREND, RANGE, CHOP veya VOLATILE olarak sınıflandırır.
-6. Teknik skor ve AI skoru üretir.
-7. Bu iki tarafın ortalamasıyla birleşik skor üretir.
-8. TP/SL, risk, lock ve execution kapılarından geçirir.
-9. Order, fill ve position state'ini SQLite içinde tekrar reconcile eder.
+Önemli klasör ve dosyalar:
 
-## Son Büyük Değişiklikler
+- `main.py`: ana bot döngüsü ve orkestrasyon
+- `desktop_app.py`: Tkinter tabanlı yerel kontrol paneli
+- `run_desktop_app.bat`: Windows'ta masaüstü uygulamayı başlatmak için kısa yol
+- `config/`: `.env` -> `Settings` dönüşümü ve davranış eşikleri
+- `core/`: execution, risk, health, reconcile, portfolio ve pozisyon mantığı
+- `strategy/`: rejim ve scoring mantığı
+- `indicators/`: teknik indikatör hesaplamaları
+- `analysis/`: Groq, Exa, CoinGecko tabanlı research/sentiment katmanı
+- `db/`: SQLite şema ve repository katmanı
+- `reporting/`: Telegram bildirimleri
+- `docs/`: masaüstü uygulama notları ve UI tasarım dökümleri
+- `scratch/`: hedefli coverage/test script'leri
+- `logs/`: çalışma anında üretilen loglar
 
-Mevcut sürümde şu stratejik ve altyapısal iyileştirmeler vardır:
+## Bağımlılıklar
 
-- **Reconciler Yenilemesi:** Muhasebe mantığı (`reconciler.py`), 843 satırdan 167 satıra düşürülerek sadeleştirildi.
-- **Test Paketi:** `scratch/` dizini altında kapsamlı white-box testleri eklendi.
-- Spot pozisyon miktarında ana source of truth artık exchange balance tarafıdır.
-- Fill geçmişi daha çok ortalama giriş ve realized PnL için kullanılır.
-- Ghost order cleanup tarafı daha kontrollü ve daha az spam üretir.
-- AI model fallback zinciri `.env` üzerinden yönetilir.
-- AI refresh TTL `.env` üzerinden ayarlanır.
-- AI skor bandı artık `-24 .. 24` aralığındadır.
-- Varsayılan AI stance fallback skorları artık:
-  - `SELL = -8`
-  - `STRONG_SELL = -16`
-  - `BUY = 8`
-  - `STRONG_BUY = 16`
-- Birleşik skor artık:
-  - `(technical_score + ai_score) / 2`
-- TP/SL motoru artık:
-  - canlı mumun `high` değerini dikkate alır,
-  - break-even stop kullanabilir,
-  - trailing rollback koruması uygular.
+`requirements.txt` içinde görünen paketler:
 
-## Mimari
+- `ccxt`
+- `pandas`
+- `pandas-ta-classic`
+- `python-dotenv`
+- `requests`
 
-### Ana akış
+Masaüstü uygulama için ayrı paket görünmüyor; bu tutarlı çünkü `desktop_app.py` Tkinter kullanıyor ve Tkinter standart Python dağıtımının parçası.
 
-- `main.py` ana runtime döngüsünü yönetir.
-- `core/` exchange, execution, reconcile, risk, TP/SL, portfolio ve health mantığını içerir.
-- `strategy/` sinyal mapping ve rejim mantığını taşır.
-- `indicators/` teknik indikatörleri üretir.
-- `analysis/` CoinGecko, Exa ve Groq tabanlı AI araştırmasını yönetir.
-- `db/` kalıcı state ve muhasebe verisini tutar.
-- `reporting/` Telegram mesajlaşmasını yönetir.
+## Kurulum
 
-### Temel tasarım ilkesi
+Python sürümü repo içinde açıkça pinlenmemiş. Kod tabanı `from __future__ import annotations`, `dataclass`, `zoneinfo` ve modern type hint kullanıyor; pratikte güncel bir Python 3.11+ ortamı tercih etmek daha güvenli olur. Bu, kod stilinden çıkarımdır; repoda zorunlu minimum sürümü yazan ayrı bir dosya görünmüyor.
 
-Bot research ve skor şekillendirme tarafında AI desteklidir; execution güvenliği tarafında ise deterministik kalır.
+Örnek kurulum:
 
-Yani:
-- AI sentiment ve threshold davranışını etkileyebilir,
-- ama order gönderimi, lock, reconcile ve muhasebe katmanı sıkı ve denetlenebilir kalmalıdır.
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-## Ana Bileşenler
+## Ortam Değişkenleri
 
-### Exchange katmanı
+Bot, `config/settings.py` içindeki fallback zinciri nedeniyle hem `.env` hem de `_.env` dosyasını okuyabiliyor. Ayrıca veritabanı yolu için hem `DB_PATH` hem `SQLITE_PATH` destekleniyor.
 
-`core/exchange.py`, OKX ile ccxt üzerinden konuşur.
+Başlangıç için `.env_example` dosyasını kopyalayıp değerleri doldur:
 
-### Execution katmanı
+```powershell
+Copy-Item .env_example .env
+```
 
-`core/execution_engine.py`, daha önce verilmiş kararları güvenli biçimde uygular. %100 branch coverage ile doğrulanmıştır.
+Önemli: `.env_example` dosyası olduğu gibi güvenli ilk deneme profili değildir. Kopyaladıktan sonra gerçek teste geçmeden önce `DRY_RUN=1` yap ve temel execution akışı doğrulanana kadar `LLM_ENABLED=0` düşün.
 
-### Reconcile katmanı
-
-`core/reconciler.py`, projenin en hassas parçalarından biridir. Sadeleştirilmiş mimari ile yeniden inşa edildi.
-
-Ana görevleri:
-- order state senkronu,
-- fill kayıtlarını yazma,
-- güncel pozisyonları yeniden üretme,
-- bot muhasebesini exchange state'ine yakın tutma.
-
-### Strategy katmanı
-
-- `strategy/scoring_engine.py`: skor -> action mapping
-- `strategy/regime_engine.py`: market rejimi tespiti
-
-### TP/SL katmanı
-
-`core/tpsl_engine.py` artık kârı daha iyi korumak için şu araçları kullanabilir:
-- stop loss,
-- partial take profit,
-- full take profit,
-- break-even stop,
-- trailing rollback koruması.
-
-### Araştırma katmanı
-
-`analysis/rumor_analyzer.py` şu kaynakları kullanabilir:
-- CoinGecko news,
-- Exa search,
-- Groq AI ve çok adımlı fallback zinciri.
-
-## Veritabanı
-
-SQLite kullanılır. Ana tablo rolleri:
-- `orders`: gönderilmiş order kayıtları
-- `fills`: gerçekleşmiş trade satırları
-- `positions`: güncel özet pozisyon state'i
-- `symbol_locks`: cooldown ve lock state'i
-- `bot_state`: streak, pending exit reason, regime state ve TP/SL state
-- `cycle_reports`: cycle özetleri
-
-## Ortam Ayarları
-
-Proje `.env` ve `_.env` okuyabilir.
-
-### Minimum gerekli alanlar
+Minimum kritik alanlar:
 
 ```env
-OKX_API_KEY=your_key
-OKX_SECRET=your_secret
-OKX_PASSPHRASE=your_passphrase
+OKX_API_KEY=your_okx_api_key
+OKX_SECRET=your_okx_secret
+OKX_PASSPHRASE=your_okx_passphrase
 
-OKX_SANDBOX=true
-DRY_RUN=true
+OKX_SANDBOX=1
+DRY_RUN=1
 
 SYMBOLS=BTC/USDT,ETH/USDT,SOL/USDT
 TIMEFRAME=15m
-LOOP_SECONDS=60
+LOOP_SECONDS=300
 DB_PATH=trading_bot.db
 ```
 
-### AI / research örneği
+Önemli notlar:
 
-```env
-LLM_ENABLED=true
-GROQ_API_KEY=your_groq_key
+- `config/settings.py` içinde `OKX_API_KEY`, `OKX_SECRET` ve `OKX_PASSPHRASE` zorunlu. Eksikse uygulama `RuntimeError` ile açılmaz.
+- `.env_example` dosyasında veritabanı anahtarı `SQLITE_PATH` olarak geçiyor. Kod geriye uyumluluk için bunu destekliyor.
+- AI research tarafı isteğe bağlı. `LLM_ENABLED=0` ile tamamen kapatılabilir.
+- Telegram alanları boş bırakılırsa bot çalışabilir; sadece notifier devre dışı kalır.
 
-GROQ_MODEL=groq/compound
-GROQ_FALLBACK_MODEL=openai/gpt-oss-120b
-GROQ_FALLBACK_FALLBACK_MODEL=llama-3.3-70b-versatile
-GROQ_FALLBACK_FALLBACK_FALLBACK_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
-GROQ_FALLBACK_FALLBACK_FALLBACK_FALLBACK_MODEL=llama-3.1-8b-instant
+## Telegram Kontrol Yüzeyi
 
-GROQ_CACHE_TTL_SECONDS=7200
-THRESHOLD_UPDATE_TTL_SECONDS=7200
+Bu projede Telegram yalnızca bildirim kanalı değildir. `TELEGRAM_TOKEN` ve `TELEGRAM_CHAT_ID` tanımlıysa `main.py` Telegram update polling yapar ve operasyonel komutları işler.
 
-EXA_API_KEY=your_exa_key
-COINGECKO_DEMO_API_KEY=your_demo_key
-```
+Mevcut kodda görünen örnek komutlar:
 
-### TP/SL örneği
+- Durum ve inceleme: `/status`, `/health`, `/positions`, `/params`, `/streaks`, `/pnl`, `/daily_pnl`, `/exit_stats`, `/price_debug`
+- Manuel kontrol: `/trigger`, `/force_refresh`, `/reconcile`
+- Yüksek etkili kontroller: `/close_all`, `/panic`, `/pause_trading`, `/resume_trading`
 
-```env
-TPSL_ENABLED=true
-STOP_LOSS_PCT=0.06
-PARTIAL_TAKE_PROFIT_ENABLED=true
-PARTIAL_TAKE_PROFIT_PCT=0.04
-FULL_TAKE_PROFIT_ENABLED=true
-FULL_TAKE_PROFIT_PCT=0.08
-
-BREAK_EVEN_STOP_ENABLED=true
-BREAK_EVEN_ACTIVATION_PCT=0.03
-BREAK_EVEN_BUFFER_PCT=0.002
-
-TRAILING_TAKE_PROFIT_ENABLED=true
-TRAILING_TAKE_PROFIT_ACTIVATION_PCT=0.05
-TRAILING_TAKE_PROFIT_GIVEBACK_PCT=0.02
-```
-
-### Günlük risk guard örneği
-
-```env
-MAX_DAILY_REALIZED_LOSS_USDT=100
-MAX_DAILY_DRAWDOWN_PCT=0.08
-```
+Bu nedenle Telegram erişimini yalnızca alert kanalı gibi değil, operasyonel kontrol yüzeyi gibi değerlendirmek gerekir.
 
 ## Çalıştırma
 
-```bash
+### Ana bot
+
+```powershell
 python main.py
 ```
 
-### Testleri Çalıştır
-```bash
-$env:PYTHONPATH="."
-pytest scratch/ --cov=core --cov=db.repositories --cov=strategy --cov-branch --cov-report=term-missing
-```
+Ana akış kabaca şöyledir:
 
-## Güvenli İlk Başlangıç
+1. Ayarları yükler.
+2. Exchange, DB ve yardımcı motorları hazırlar.
+3. Her cycle'da market verisi çeker.
+4. Teknik skor, AI skor, rejim ve risk kontrollerini birlikte değerlendirir.
+5. Gerekirse emir gönderir.
+6. Sonucu log ve SQLite state içine yazar.
 
-İlk test için:
+İlk güvenli deneme için önerilen ayarlar:
 
 ```env
-OKX_SANDBOX=true
-DRY_RUN=true
-LLM_ENABLED=false
+OKX_SANDBOX=1
+DRY_RUN=1
+LLM_ENABLED=0
 ```
 
-## Önemli Ayar Alanları
+### Masaüstü kontrol paneli
 
-### Risk ve sizing
+```powershell
+python desktop_app.py
+```
 
-- `MIN_ORDER_QUOTE_USDT`, `MIN_FREE_USDT`, `MAX_OPEN_POSITIONS`, `MAX_SYMBOL_EXPOSURE_PCT`, `MAX_TOTAL_EXPOSURE_PCT`, `MAX_SINGLE_TRADE_PCT`, `MAX_DAILY_REALIZED_LOSS_USDT`, `MAX_DAILY_DRAWDOWN_PCT`.
+Windows'ta doğrudan:
 
-### Threshold'lar
+```powershell
+.\run_desktop_app.bat
+```
 
-- `BUY_THRESHOLD`, `STRONG_BUY_THRESHOLD`, `SELL_THRESHOLD`, `STRONG_SELL_THRESHOLD`.
+Yalnızca veritabanı bağlantısını doğrulamak için:
 
-### Scale-in
+```powershell
+python desktop_app.py --check
+```
 
-- `SCALE_IN_ENABLED`, `SCALE_IN_TRIGGER_STREAK`, `STRONG_SCALE_IN_TRIGGER_STREAK`, `MAX_SCALE_IN_COUNT`.
+Farklı bir SQLite dosyasıyla çalıştırmak için:
 
-### TP/SL
+```powershell
+python desktop_app.py --db trading_bot.db
+```
 
-- `STOP_LOSS_PCT`, `PARTIAL_TAKE_PROFIT_PCT`, `FULL_TAKE_PROFIT_PCT`, `BREAK_EVEN_ACTIVATION_PCT`, `TRAILING_TAKE_PROFIT_ACTIVATION_PCT`, `TRAILING_TAKE_PROFIT_GIVEBACK_PCT`.
+Masaüstü uygulama doğrudan emir göndermez; `bot_state` içine kontrol bayrakları yazar. `docs/desktop_app.md` dosyasına göre force refresh, pause trading ve panic mode gibi operasyonel kontroller bu kanal üzerinden yürütülür.
 
-### AI
+## Konfigürasyon Başlıkları
 
-- `GROQ_MODEL`, `GROQ_FALLBACK_MODEL`, `GROQ_CACHE_TTL_SECONDS`, `THRESHOLD_UPDATE_TTL_SECONDS`.
+Repo içinde görünen önemli ayar grupları:
 
-## İzlenecek Loglar
+- Exchange ve çalışma modu: `OKX_SANDBOX`, `DRY_RUN`, `OKX_TD_MODE`
+- Veri toplama: `SYMBOLS`, `TIMEFRAME`, `OHLCV_LIMIT`, `LOOP_SECONDS`
+- Emir ve exposure limitleri: `MIN_ORDER_QUOTE_USDT`, `MAX_OPEN_POSITIONS`, `MAX_SYMBOL_EXPOSURE_PCT`, `MAX_TOTAL_EXPOSURE_PCT`, `MAX_SINGLE_TRADE_PCT`
+- Günlük risk guard'ları: `MAX_DAILY_REALIZED_LOSS_USDT`, `MAX_DAILY_DRAWDOWN_PCT`
+- Scale-in davranışı: `SCALE_IN_ENABLED`, `SCALE_IN_TRIGGER_STREAK`, `MAX_SCALE_IN_COUNT`
+- TP/SL: `STOP_LOSS_PCT`, `PARTIAL_TAKE_PROFIT_PCT`, `FULL_TAKE_PROFIT_PCT`, `BREAK_EVEN_*`, `TRAILING_TAKE_PROFIT_*`
+- Rejim motoru: `REGIME_*`
+- Telegram: `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`, `NOTIFY_EVERY_CYCLE`
+- AI / research: `LLM_ENABLED`, `GROQ_*`, `EXA_API_KEY`, `COINGECKO_*`
 
-Önemli loglar:
-- `[RECON]`, `[POSITION]`, `[POSITION MISMATCH]`, `[BUY SENT]`, `[TPSL TRIGGER]`, `[GROQ REFRESH]`, `[GHOST ORDER CLEANED]`.
+## Veritabanı ve Durum Yönetimi
 
-## Güvenlik Uyarısı
+`db/database.py` dosyasına göre ana tablolar:
 
-Bu proje order gönderebilir.
+- `orders`: gönderilen emir kayıtları
+- `fills`: gerçekleşen trade kayıtları ve fill-level realized PnL
+- `positions`: sembol bazlı güncel özet pozisyon state'i
+- `symbol_locks`: cooldown ve kilit durumu
+- `bot_state`: küçük ama kritik runtime/state anahtarları
+- `cycle_reports`: bot cycle özetleri
 
-Gerçek hesaba geçmeden önce:
-- sandbox test et,
-- `DRY_RUN=true` ile birden fazla cycle izle,
-- muhafazakâr exposure ile başla,
-- `bot.log` dosyasını oku,
-- canlı sermayeye güvenmeden önce reconcile davranışını doğrula.
+SQLite tarafı WAL modunda açılıyor. Bu, bot ve masaüstü uygulamanın aynı DB üzerinde okuma/yazma yapması açısından anlamlı bir tercih.
+
+## Loglar ve Operasyonel İzleme
+
+Kod şu anda iki log dosyasına yazar:
+
+- `logs/bot.log`
+- `logs/okx_debug.log`
+
+Ana runtime logunu `main.py` yönetir. `core/exchange.py` ise düşük seviye exchange adapter debug çıktısını ayrıca `logs/okx_debug.log` dosyasına yazar.
+
+Takip etmeye değer log etiketleri:
+
+- `[RECONCILE]`
+- `[BUY SENT]`
+- `[SELL SENT]`
+- `[TPSL CHECK]`
+- `[TPSL TRIGGER]`
+- `[GROQ REFRESH]`
+- `[AI THRESHOLD]`
+
+## Geliştirme Notları
+
+- `scratch/` klasörü, klasik test paketi yerine hedefli coverage/test script'leri içeriyor. Ayrı bir `tests/` klasörü veya `pytest.ini` görünmüyor.
+- `docs/ui_design.md`, gelecekteki kontrol yüzeyi için implementasyon notları içeriyor.
+- `docs/ui_mockup.*` dosyaları UI tasarım çıktıları gibi görünüyor; botun çekirdek çalışma akışının parçası değiller.
+- Çalışma ağacında `trading_bot.db`, `test.db`, `.coverage` ve `logs/` gibi runtime çıktıları bulunuyor. Bunlar repo davranışını anlamak için faydalı ama kaynak kodun zorunlu parçası değiller.
+
+## Bilinen Sınırlar
+
+Kaynak dosyalara göre görünen sınırlar:
+
+- Proje production-grade dağıtım/paketleme akışını tamamlamış görünmüyor.
+- Masaüstü uygulama ilk sürüm kontrol paneli; paketlenmiş `.exe` değil.
+- AI research katmanı dış servis ve API anahtarlarına bağlı; başarısızlıklar için fallback mantığı var ama bu katman deterministik değil.
+- Gerçek pozisyon doğruluğu açısından kritik katman `core/reconciler.py`; bu nedenle canlı kullanımdan önce reconcile davranışı özellikle izlenmeli.
+
+## Güvenli Doğrulama Akışı
+
+Önerilen doğrulama sırası:
+
+1. `.env` dosyasını doldur.
+2. `OKX_SANDBOX=1` ve `DRY_RUN=1` ile başlat.
+3. `python main.py` çalıştır.
+4. `logs/bot.log` içinde health, reconcile ve signal akışını izle.
+5. `python desktop_app.py --check` ile DB erişimini doğrula.
+6. `python desktop_app.py` ile üretilen state'in UI tarafında okunabildiğini kontrol et.
+7. Ancak bu adımlardan sonra gerçek emir akışına yaklaş.
+
+## Hızlı Okuma Sırası
+
+Repo içine yeni giren biri için önerilen sıra:
+
+1. `README_TR.md`
+2. `README.md`
+3. `main.py`
+4. `config/settings.py`
+5. `core/reconciler.py`
+6. `core/tpsl_engine.py`
+7. `strategy/scoring_engine.py`
+8. `analysis/rumor_analyzer.py`
+9. `db/database.py`
+10. `docs/desktop_app.md`
