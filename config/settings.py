@@ -187,17 +187,17 @@ class Settings:
 
     # ---------------- TP / SL ----------------
     tpsl_enabled: bool = _env_bool("TPSL_ENABLED", "true")
-    stop_loss_pct: float = _env_float("STOP_LOSS_PCT", "0.10")
+    stop_loss_pct: float = _env_float("STOP_LOSS_PCT", "0.045")
     partial_take_profit_enabled: bool = _env_bool("PARTIAL_TAKE_PROFIT_ENABLED", "true")
-    partial_take_profit_pct: float = _env_float("PARTIAL_TAKE_PROFIT_PCT", "0.05")
+    partial_take_profit_pct: float = _env_float("PARTIAL_TAKE_PROFIT_PCT", "0.025")
     full_take_profit_enabled: bool = _env_bool("FULL_TAKE_PROFIT_ENABLED", "true")
-    full_take_profit_pct: float = _env_float("FULL_TAKE_PROFIT_PCT", "0.12")
+    full_take_profit_pct: float = _env_float("FULL_TAKE_PROFIT_PCT", "0.06")
     break_even_stop_enabled: bool = _env_bool("BREAK_EVEN_STOP_ENABLED", "true")
-    break_even_activation_pct: float = _env_float("BREAK_EVEN_ACTIVATION_PCT", "0.03")
-    break_even_buffer_pct: float = _env_float("BREAK_EVEN_BUFFER_PCT", "0.002")
+    break_even_activation_pct: float = _env_float("BREAK_EVEN_ACTIVATION_PCT", "0.018")
+    break_even_buffer_pct: float = _env_float("BREAK_EVEN_BUFFER_PCT", "0.001")
     trailing_take_profit_enabled: bool = _env_bool("TRAILING_TAKE_PROFIT_ENABLED", "true")
-    trailing_take_profit_activation_pct: float = _env_float("TRAILING_TAKE_PROFIT_ACTIVATION_PCT", "0.05")
-    trailing_take_profit_giveback_pct: float = _env_float("TRAILING_TAKE_PROFIT_GIVEBACK_PCT", "0.02")
+    trailing_take_profit_activation_pct: float = _env_float("TRAILING_TAKE_PROFIT_ACTIVATION_PCT", "0.025")
+    trailing_take_profit_giveback_pct: float = _env_float("TRAILING_TAKE_PROFIT_GIVEBACK_PCT", "0.012")
 
     # ---------------- REGIME ENGINE ----------------
     regime_enabled: bool = _env_bool("REGIME_ENABLED", "false")
@@ -290,9 +290,9 @@ class Settings:
     groq_fallback_fallback_fallback_fallback_model: str = _env("GROQ_FALLBACK_FALLBACK_FALLBACK_FALLBACK_MODEL", "")
     groq_cache_ttl_seconds: int = _env_int("GROQ_CACHE_TTL_SECONDS", "36000")
     threshold_update_ttl_seconds: int = _env_int("THRESHOLD_UPDATE_TTL_SECONDS", "36000")
-    research_context_max_chars: int = _env_int("RESEARCH_CONTEXT_MAX_CHARS", "700")
-    bulk_refresh_max_context_chars_per_symbol: int = _env_int("BULK_REFRESH_MAX_CONTEXT_CHARS_PER_SYMBOL", "420")
-    threshold_snapshot_max_symbols: int = _env_int("THRESHOLD_SNAPSHOT_MAX_SYMBOLS", "5")
+    research_context_max_chars: int = _env_int("RESEARCH_CONTEXT_MAX_CHARS", "500")
+    bulk_refresh_max_context_chars_per_symbol: int = _env_int("BULK_REFRESH_MAX_CONTEXT_CHARS_PER_SYMBOL", "260")
+    threshold_snapshot_max_symbols: int = _env_int("THRESHOLD_SNAPSHOT_MAX_SYMBOLS", "4")
 
     # ---------------- SIGNAL STREAK ----------------
     signal_hold_decay_after: int = _env_int("SIGNAL_HOLD_DECAY_AFTER", "2")

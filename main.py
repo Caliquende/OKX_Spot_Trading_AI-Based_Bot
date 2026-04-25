@@ -49,6 +49,7 @@ import datetime
 from logging.handlers import RotatingFileHandler
 from zoneinfo import ZoneInfo
 
+import ccxt
 import pandas as pd
 
 from analysis.rumor_analyzer import aggregate_rumor, clear_refresh_state, refresh_all_if_needed, get_cached_rumors, update_thresholds_if_needed
@@ -142,6 +143,20 @@ def notify_safe(notifier: TelegramNotifier | None, message: str) -> None:
         logging.exception("[TELEGRAM SEND ERROR] %s", exc)
 
 
+def is_transient_exchange_error(exc: Exception) -> bool:
+    return isinstance(
+        exc,
+        (
+            ccxt.OnMaintenance,
+            ccxt.ExchangeNotAvailable,
+            ccxt.RequestTimeout,
+            ccxt.NetworkError,
+            ccxt.DDoSProtection,
+            ccxt.RateLimitExceeded,
+        ),
+    )
+
+
 def extract_reference_price(ticker: dict) -> tuple[float, str]:
     """
     PnL ve debug çıktılarında tek fiyat kaynağı standardı kullan.
@@ -171,6 +186,113 @@ def extract_reference_price(ticker: dict) -> tuple[float, str]:
             continue
 
     raise ValueError("no usable reference price in ticker payload")
+
+
+def _clamp_float(value: object, default: float, min_value: float, max_value: float) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        parsed = float(default)
+    return max(min_value, min(max_value, parsed))
+
+
+def _rumor_summaries(rumor: dict) -> str:
+    providers = rumor.get("providers", []) if isinstance(rumor, dict) else []
+    summaries: list[str] = []
+    for provider in providers:
+        if isinstance(provider, dict):
+            summaries.append(str(provider.get("summary") or ""))
+    return " ".join(summaries).lower()
+
+
+def normalize_ai_score_for_strategy(rumor: dict) -> tuple[float, dict]:
+    raw_score = _clamp_float((rumor or {}).get("rumor_total_score"), 0.0, -24.0, 24.0)
+    confidence = _clamp_float((rumor or {}).get("rumor_avg_confidence"), 0.0, 0.0, 1.0)
+    summary_text = _rumor_summaries(rumor or {})
+    weak_catalyst = any(
+        marker in summary_text
+        for marker in (
+            "no clear asset-specific catalyst",
+            "no meaningful catalyst",
+            "provider disabled",
+            "api error",
+            "cache miss",
+            "rate limited",
+        )
+    )
+
+    adjusted = raw_score
+    if adjusted > 0:
+        if weak_catalyst:
+            adjusted = min(adjusted, 2.0)
+        if confidence < 0.55:
+            adjusted = min(adjusted, 1.5)
+        confidence_multiplier = 0.25 + (0.75 * confidence)
+    elif adjusted < 0:
+        if weak_catalyst:
+            adjusted = max(adjusted, -8.0)
+        confidence_multiplier = 0.50 + (0.50 * confidence)
+    else:
+        confidence_multiplier = 0.0
+
+    effective = round(adjusted * confidence_multiplier, 2)
+    return effective, {
+        "raw": raw_score,
+        "effective": effective,
+        "confidence": confidence,
+        "weak_catalyst": weak_catalyst,
+    }
+
+
+def combine_strategy_score(indicator_score: float, effective_ai_score: float, raw_ai_score: float, has_position: bool) -> float:
+    ai_weight = 0.25
+    if has_position and raw_ai_score < 0:
+        ai_weight = 0.40
+    indicator_weight = 1.0 - ai_weight
+    return round((float(indicator_score) * indicator_weight) + (float(effective_ai_score) * ai_weight), 2)
+
+
+def apply_ai_thresholds_conservatively(regime_params: dict, ai_thresholds: dict) -> dict:
+    params = dict(regime_params)
+    if not isinstance(ai_thresholds, dict):
+        return params
+
+    base_buy = float(params["buy_threshold"])
+    base_strong_buy = float(params["strong_buy_threshold"])
+    base_sell = float(params["sell_threshold"])
+    base_strong_sell = float(params["strong_sell_threshold"])
+    base_buy_pct = float(params["buy_pct"])
+    base_strong_buy_pct = float(params["strong_buy_pct"])
+
+    buy_threshold = max(base_buy, _clamp_float(ai_thresholds.get("buy_threshold"), base_buy, 1.0, 15.0))
+    strong_buy_threshold = max(
+        buy_threshold,
+        base_strong_buy,
+        _clamp_float(ai_thresholds.get("strong_buy_threshold"), base_strong_buy, 1.0, 18.0),
+    )
+    sell_threshold = max(base_sell, _clamp_float(ai_thresholds.get("sell_threshold"), base_sell, -18.0, -1.0))
+    strong_sell_threshold = max(
+        base_strong_sell,
+        _clamp_float(ai_thresholds.get("strong_sell_threshold"), base_strong_sell, -20.0, -1.0),
+    )
+    strong_sell_threshold = min(strong_sell_threshold, sell_threshold)
+
+    params.update(
+        {
+            "buy_threshold": buy_threshold,
+            "strong_buy_threshold": strong_buy_threshold,
+            "sell_threshold": sell_threshold,
+            "strong_sell_threshold": strong_sell_threshold,
+            "buy_pct": min(base_buy_pct, _clamp_float(ai_thresholds.get("buy_pct"), base_buy_pct, 0.001, 0.20)),
+            "strong_buy_pct": min(
+                base_strong_buy_pct,
+                _clamp_float(ai_thresholds.get("strong_buy_pct"), base_strong_buy_pct, 0.001, 0.25),
+            ),
+            "ai_adjusted": True,
+        }
+    )
+    params["strong_buy_pct"] = max(params["strong_buy_pct"], params["buy_pct"])
+    return params
 
 
 def ohlcv_to_df(rows: list[list[float]]) -> pd.DataFrame:
@@ -1858,7 +1980,13 @@ def main() -> None:
                         "providers": [],
                     }
                     ai_score = float(rumor["rumor_total_score"])
-                    total_score = round((float(indicator_score) + ai_score) / 2.0, 2)
+                    effective_ai_score, ai_score_diag = normalize_ai_score_for_strategy(rumor)
+                    total_score = combine_strategy_score(
+                        indicator_score=indicator_score,
+                        effective_ai_score=effective_ai_score,
+                        raw_ai_score=ai_score,
+                        has_position=has_position,
+                    )
 
                     regime = "BASE"
                     regime_params = {
@@ -1889,16 +2017,7 @@ def main() -> None:
                         regime_params = resolve_regime_params(settings, regime)
                         
                         if ai_thresholds and isinstance(ai_thresholds, dict):
-                            regime_params = {
-                                **regime_params,
-                                "buy_threshold": float(ai_thresholds.get("buy_threshold", regime_params["buy_threshold"])),
-                                "strong_buy_threshold": float(ai_thresholds.get("strong_buy_threshold", regime_params["strong_buy_threshold"])),
-                                "sell_threshold": float(ai_thresholds.get("sell_threshold", regime_params["sell_threshold"])),
-                                "strong_sell_threshold": float(ai_thresholds.get("strong_sell_threshold", regime_params["strong_sell_threshold"])),
-                                "buy_pct": float(ai_thresholds.get("buy_pct", regime_params["buy_pct"])),
-                                "strong_buy_pct": float(ai_thresholds.get("strong_buy_pct", regime_params["strong_buy_pct"])),
-                            }
-                            regime_params["ai_adjusted"] = True
+                            regime_params = apply_ai_thresholds_conservatively(regime_params, ai_thresholds)
 
                         regime_data[symbol] = regime_diag
                         if market_data.get(symbol):
@@ -1907,7 +2026,7 @@ def main() -> None:
                         logging.info(f"[REGIME RAW] {symbol} prev={_prev_regime} diag={regime_diag} params={regime_params}")
 
                     logging.info(
-                        f"[DEBUG SCORE] symbol={symbol} indicator={indicator_score}, ai_score={ai_score}, details={indicator_details}, rumor={rumor}, total={total_score}"
+                        f"[DEBUG SCORE] symbol={symbol} indicator={indicator_score}, ai_score={ai_score}, effective_ai_score={effective_ai_score}, ai_diag={ai_score_diag}, details={indicator_details}, rumor={rumor}, total={total_score}"
                     )
                     signal = evaluate_signal(total_score, regime_params)
                     ai_tag = " [AI_THRESHOLDS]" if regime_params.get("ai_adjusted") else ""
@@ -2348,6 +2467,18 @@ def main() -> None:
                                 symbol,
                                 "exit_sent",
                             )
+                        elif (
+                            execution_note.startswith("blocked:scale_in:no_scale_in_on_loser")
+                            or execution_note.startswith("blocked:max_scale_in_count")
+                            or execution_note.startswith("blocked:scale_in:invalid_avg")
+                        ):
+                            streak = decay_signal_streak(
+                                bot_state_repo,
+                                signal_state,
+                                symbol,
+                                max(1, int(getattr(settings, "scale_in_trigger_streak", 3) or 3)),
+                                execution_note,
+                            )
                         elif not has_position:
                             # Pozisyon yoksa eski streak'i taşımak anlamsız.
                             streak = reset_signal_streak(
@@ -2423,14 +2554,24 @@ def main() -> None:
                 notify_safe(notifier, report_text)
 
         except Exception as exc:
-            status = "FAIL"
-            logging.exception("main loop crashed")
-            crash_text = f"[MAIN LOOP CRASH]\n{str(exc)}\n\n{traceback.format_exc()[:2000]}"
-            notify_safe(notifier, crash_text)
-            db.execute(
-                "INSERT INTO cycle_reports(cycle_started_ms, cycle_finished_ms, summary, status) VALUES (?, ?, ?, ?)",
-                (cycle_started_ms, int(time.time() * 1000), crash_text, status),
-            )
+            if is_transient_exchange_error(exc):
+                status = "SKIPPED"
+                logging.warning("[CYCLE SKIPPED] transient exchange error: %s", exc, exc_info=True)
+                crash_text = f"[CYCLE SKIPPED]\ntransient_exchange_error\n{str(exc)}"
+                notify_safe(notifier, crash_text)
+                db.execute(
+                    "INSERT INTO cycle_reports(cycle_started_ms, cycle_finished_ms, summary, status) VALUES (?, ?, ?, ?)",
+                    (cycle_started_ms, int(time.time() * 1000), crash_text, status),
+                )
+            else:
+                status = "FAIL"
+                logging.exception("main loop crashed")
+                crash_text = f"[MAIN LOOP CRASH]\n{str(exc)}\n\n{traceback.format_exc()[:2000]}"
+                notify_safe(notifier, crash_text)
+                db.execute(
+                    "INSERT INTO cycle_reports(cycle_started_ms, cycle_finished_ms, summary, status) VALUES (?, ?, ?, ?)",
+                    (cycle_started_ms, int(time.time() * 1000), crash_text, status),
+                )
 
         # -------------------------
         # MANUAL TRIGGER CHECK

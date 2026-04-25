@@ -268,6 +268,34 @@ class TPSLEngine:
                 result["reason"] = "break_even_stop_hit"
                 return result
 
+        # TR: 4h mumlarda loglar sıkça +2.5% civarı peak sonrası pozisyonun tekrar
+        # eksiye döndüğünü gösterdi. Klasik trailing eşiği 5% ise bu kârı korumaz.
+        # EN: Logs showed many +2.5% peak round-trips on 4h candles. A 5% trailing
+        # threshold does not protect that profit band.
+        early_profit_activation_pct = min(
+            x for x in (
+                partial_take_profit_pct if partial_take_profit_pct > 0 else 0.025,
+                trailing_activation_pct if trailing_activation_pct > 0 else 0.025,
+                0.025,
+            )
+        )
+        early_profit_giveback_pct = min(
+            trailing_giveback_pct if trailing_giveback_pct > 0 else 0.02,
+            0.02,
+        )
+        if peak_pnl_pct >= early_profit_activation_pct and pnl_pct <= 0:
+            result["triggered"] = True
+            result["action"] = "FULL_CLOSE"
+            result["reason"] = "profit_roundtrip_stop_hit"
+            return result
+
+        if peak_pnl_pct >= early_profit_activation_pct and trailing_retrace_pct >= early_profit_giveback_pct:
+            partial_tp_done = bool((state or {}).get("partial_tp_done", False))
+            result["triggered"] = True
+            result["action"] = "FULL_CLOSE" if partial_tp_done else "PARTIAL_CLOSE"
+            result["reason"] = "early_trailing_profit_hit"
+            return result
+
         # TR: Full TP, partial'dan once kontrol edilir.
         # EN: Full TP is checked before partial TP.
         # TR: Fiyat bir anda full TP'ye degdiyse gereksiz partial ile vakit kaybetmeyiz.

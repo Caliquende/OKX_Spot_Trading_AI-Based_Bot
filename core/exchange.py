@@ -74,6 +74,27 @@ class OKXExchange:
 
     def fetch_balance(self) -> dict[str, Any]:
         # Ham balance verisini borsadan getirir.
+        last_exc: Exception | None = None
+        retryable_errors = (
+            ccxt.OnMaintenance,
+            ccxt.ExchangeNotAvailable,
+            ccxt.RequestTimeout,
+            ccxt.NetworkError,
+            ccxt.DDoSProtection,
+            ccxt.RateLimitExceeded,
+        )
+        for attempt in range(1, 4):
+            try:
+                return self.ex.fetch_balance()
+            except retryable_errors as exc:
+                last_exc = exc
+                if attempt >= 3:
+                    break
+                logger.warning("[BALANCE RETRY] attempt=%s err=%s", attempt, exc)
+                time.sleep(2 * attempt)
+
+        if last_exc is not None:
+            raise last_exc
         return self.ex.fetch_balance()
 
     def fetch_ticker(self, symbol: str) -> dict[str, Any]:

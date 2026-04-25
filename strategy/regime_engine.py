@@ -130,9 +130,13 @@ def detect_market_regime(df, settings, current_regime: str = "BASE") -> tuple[st
 
     regime = current_regime if current_regime in {"TREND", "RANGE", "CHOP", "VOLATILE"} else None
 
-    # Mevcut VOLATILE ise: exit bar aşıldıysa düş, yoksa kal
+    # Mevcut VOLATILE ise: low-ADX chop/range karakteri baskınsa yeniden değerlendir.
+    # Sadece ATR eşiğini geçti diye VOLATILE'da yapışmak, loglarda sıradan 4h chop'u
+    # "volatile trend" gibi yönetmeye neden oluyordu.
     if regime == "VOLATILE":
-        if not _volatile_exit(atr_ratio, settings):
+        if _chop_ok(adx, ema_dist_ratio, settings):
+            regime = None
+        elif not _volatile_exit(atr_ratio, settings):
             pass  # kalıyoruz, aşağıda tekrar atanacak
         else:
             regime = None  # yeniden değerlendir
@@ -160,14 +164,14 @@ def detect_market_regime(df, settings, current_regime: str = "BASE") -> tuple[st
 
     # Regime çözülemediyse veya başlangıçta yoksa fresh detection
     if regime is None:
-        if _volatile_ok(atr_ratio, settings):
-            regime = "VOLATILE"
-        elif _trend_ok(adx, trend_persistence, ema_dist_ratio, settings):
+        if _trend_ok(adx, trend_persistence, ema_dist_ratio, settings):
             regime = "TREND"
         elif _range_ok(adx, ema_dist_ratio, atr_ratio, settings):
             regime = "RANGE"
         elif _chop_ok(adx, ema_dist_ratio, settings):
             regime = "CHOP"
+        elif _volatile_ok(atr_ratio, settings):
+            regime = "VOLATILE"
         else:
             regime = "RANGE"
 

@@ -552,6 +552,17 @@ def _provider_result_from_payload(provider_name: str, symbol: str, payload: dict
     score = _normalize_score(payload.get("score"), stance)
     confidence = _normalize_confidence(payload.get("confidence"))
     reasoning = str(payload.get("reasoning") or payload.get("summary") or "").strip()
+    reasoning_lower = reasoning.lower()
+    weak_catalyst = (
+        "no clear asset-specific catalyst" in reasoning_lower
+        or "no meaningful catalyst" in reasoning_lower
+    )
+    if weak_catalyst and score > 0:
+        score = min(score, 2)
+    elif weak_catalyst and score < 0:
+        score = max(score, -8)
+    if confidence < 0.55 and score > 0:
+        score = min(score, 1)
     return ProviderResult(
         provider=provider_name,
         symbol=symbol,
