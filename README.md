@@ -8,11 +8,12 @@ Legal Disclaimer: Systems used in live markets carry financial risk.
 
 ## Current Status
 
-This repository is a focused alpha with:
-- **Logic verification through extensive white-box testing (95%+ branch coverage on core modules).**
-- **Refactored accounting layer (`reconciler.py`) simplified from 843 to 167 lines for high auditability.**
-- Strategy tuning and iterative development.
-- It is not presented as a guaranteed production-grade system.
+This repository is a working alpha focused on:
+- **logic verification through extensive white-box testing (95%+ branch coverage on core modules),**
+- **refactored accounting layer (`reconciler.py`) simplified for high auditability,**
+- learning, testing, iterative development, and strategy tuning.
+
+It is not presented as a guaranteed production-grade system.
 
 ## What The Bot Does
 
@@ -30,21 +31,23 @@ On each cycle, the bot broadly does the following:
 
 ## What Changed Recently
 
-The current version reflects recent structural and logic hardening:
+The current version reflects the latest structural and logic hardening:
 
-- **Reconciler Refactoring:** Core accounting logic simplified for better maintainability and error handling.
+- **Reconciler Refactoring:** Core accounting logic simplified from 843 to 167 lines for better maintainability and error handling.
 - **High Test Coverage:** Achieved 95%-100% branch coverage across `ExecutionEngine`, `TPSLEngine`, and `RegimeEngine`.
 - **Database Integrity:** Repositories now verified via in-memory SQLite test suites.
 - Spot position quantity now follows exchange balance as the main source of truth.
 - Fill history is mainly used for average entry and realized PnL.
 - Ghost order cleanup is less noisy and state-aware.
 - AI model fallback chain and refresh TTL are configurable from `.env`.
-- TP/SL logic now includes candle-high-aware take profit detection, break-even stop logic, and trailing rollback protection.
+- AI score band is now `-24 .. 24`.
+- Default AI stance fallback scores are now: `SELL = -8`, `STRONG_SELL = -16`, `BUY = 8`, `STRONG_BUY = 16`.
+- Combined score is now: `(technical_score + ai_score) / 2`.
+- TP/SL logic now includes candle-high-aware take profit detection, break-even stop logic, and trailing take-profit rollback protection.
 
 ## Architecture
 
 ### Main flow
-
 - `main.py` orchestrates the runtime loop.
 - `core/` contains exchange, execution, reconcile, risk, TP/SL, portfolio, and health logic.
 - `strategy/` contains signal mapping and regime logic.
@@ -54,9 +57,7 @@ The current version reflects recent structural and logic hardening:
 - `reporting/` handles Telegram messaging.
 
 ### Design principle
-
-The bot is AI-assisted in research and score shaping, but execution safety is deterministic.
-Order submission, locks, reconciliation, and accounting remain strict and auditable.
+The bot is AI-assisted in research and score shaping, but execution safety is deterministic. Order submission, locks, reconciliation, and accounting remain strict and auditable.
 
 ## Core Components
 
@@ -64,17 +65,34 @@ Order submission, locks, reconciliation, and accounting remain strict and audita
 `core/exchange.py` talks to OKX through ccxt.
 
 ### Execution layer
-`core/execution_engine.py` applies already-made decisions safely. Verified with 100% branch coverage.
+`core/execution_engine.py` applies decisions safely. Verified with 100% branch coverage.
 
 ### Reconcile layer
-`core/reconciler.py` is the sensitive accounting core. Syncs order state, writes fills, and rebuilds positions. Simplified for high reliability.
+`core/reconciler.py` is the sensitive accounting core. Simplified for high reliability and verified with 90% branch coverage.
+
+### Strategy layer
+- `strategy/scoring_engine.py`: maps score to action
+- `strategy/regime_engine.py`: detects market regime (100% coverage)
 
 ### TP/SL layer
 `core/tpsl_engine.py` protects profits with Stop Loss, Partial/Full Take Profit, Break-Even Stop, and Trailing Protection.
 
+### Research layer
+`analysis/rumor_analyzer.py` uses CoinGecko, Exa, and Groq AI with multi-step model fallback.
+
+## Database
+
+SQLite is used. Main table roles:
+- `orders`: submitted order records
+- `fills`: executed trade rows
+- `positions`: current summarized position state
+- `symbol_locks`: cooldown and lock state
+- `bot_state`: streaks, pending exit reasons, regime, and TP/SL state
+- `cycle_reports`: cycle summaries
+
 ## Testing
 
-The project emphasizes logic verification through white-box testing. Comprehensive test suites are located in the `scratch/` directory.
+The project emphasizes logic verification through white-box testing. Comprehensive test suites are in the `scratch/` directory.
 
 ### Run all tests with coverage
 ```bash
@@ -86,7 +104,7 @@ pytest scratch/ --cov=core --cov=db.repositories --cov=strategy --cov-branch --c
 - `strategy/regime_engine.py`: **100% Branch Coverage**
 - `core/execution_engine.py`: **100% Branch Coverage**
 - `core/tpsl_engine.py`: **96% Branch Coverage**
-- `db/repositories.py`: **90% Branch Coverage** (Verified with in-memory SQLite)
+- `db/repositories.py`: **90% Branch Coverage** (In-memory SQL verified)
 - `core/reconciler.py`: **90% Branch Coverage**
 
 ## Environment Configuration
@@ -98,7 +116,7 @@ OKX_SECRET=your_secret
 OKX_PASSPHRASE=your_passphrase
 OKX_SANDBOX=true
 DRY_RUN=true
-SYMBOLS=BTC/USDT,ETH/USDT
+SYMBOLS=BTC/USDT,ETH/USDT,SOL/USDT
 TIMEFRAME=15m
 LOOP_SECONDS=60
 DB_PATH=trading_bot.db
@@ -107,35 +125,76 @@ DB_PATH=trading_bot.db
 ### AI / research example
 ```env
 LLM_ENABLED=true
-GROQ_API_KEY=your_groq_key
+GROQ_API_KEY=your_key
 GROQ_MODEL=groq/compound
 GROQ_FALLBACK_MODEL=openai/gpt-oss-120b
 GROQ_FALLBACK_FALLBACK_MODEL=llama-3.3-70b-versatile
 GROQ_CACHE_TTL_SECONDS=7200
+THRESHOLD_UPDATE_TTL_SECONDS=7200
 EXA_API_KEY=your_exa_key
+COINGECKO_DEMO_API_KEY=your_demo_key
 ```
 
 ### TP/SL example
 ```env
 TPSL_ENABLED=true
 STOP_LOSS_PCT=0.06
+PARTIAL_TAKE_PROFIT_ENABLED=true
 PARTIAL_TAKE_PROFIT_PCT=0.04
+FULL_TAKE_PROFIT_ENABLED=true
 FULL_TAKE_PROFIT_PCT=0.08
 BREAK_EVEN_STOP_ENABLED=true
+BREAK_EVEN_ACTIVATION_PCT=0.03
 TRAILING_TAKE_PROFIT_ENABLED=true
+TRAILING_TAKE_PROFIT_ACTIVATION_PCT=0.05
+TRAILING_TAKE_PROFIT_GIVEBACK_PCT=0.02
+```
+
+### Daily risk guard example
+```env
+MAX_DAILY_REALIZED_LOSS_USDT=100
+MAX_DAILY_DRAWDOWN_PCT=0.08
+```
+
+## Run
+```bash
+python main.py
+```
+
+## Recommended Safe Start
+For a first run:
+```env
+OKX_SANDBOX=true
+DRY_RUN=true
+LLM_ENABLED=false
 ```
 
 ## Important Config Areas
 
 ### Risk and sizing
-- `MAX_OPEN_POSITIONS`, `MAX_SYMBOL_EXPOSURE_PCT`, `MAX_TOTAL_EXPOSURE_PCT`, `MAX_DAILY_REALIZED_LOSS_USDT`, `MAX_DAILY_DRAWDOWN_PCT`.
+- `MIN_ORDER_QUOTE_USDT`, `MIN_FREE_USDT`, `MAX_OPEN_POSITIONS`, `MAX_SYMBOL_EXPOSURE_PCT`, `MAX_TOTAL_EXPOSURE_PCT`, `MAX_SINGLE_TRADE_PCT`, `MAX_DAILY_REALIZED_LOSS_USDT`, `MAX_DAILY_DRAWDOWN_PCT`.
+
+### Thresholds
+- `BUY_THRESHOLD`, `STRONG_BUY_THRESHOLD`, `SELL_THRESHOLD`, `STRONG_SELL_THRESHOLD`.
 
 ### Scale-in
-- `SCALE_IN_ENABLED`, `SCALE_IN_TRIGGER_STREAK`, `MAX_SCALE_IN_COUNT`.
+- `SCALE_IN_ENABLED`, `SCALE_IN_TRIGGER_STREAK`, `STRONG_SCALE_IN_TRIGGER_STREAK`, `MAX_SCALE_IN_COUNT`.
+
+### TP/SL
+- `STOP_LOSS_PCT`, `PARTIAL_TAKE_PROFIT_PCT`, `FULL_TAKE_PROFIT_PCT`, `BREAK_EVEN_ACTIVATION_PCT`, `TRAILING_TAKE_PROFIT_ACTIVATION_PCT`, `TRAILING_TAKE_PROFIT_GIVEBACK_PCT`.
+
+### AI
+- `GROQ_MODEL`, `GROQ_FALLBACK_MODEL`, `GROQ_CACHE_TTL_SECONDS`, `THRESHOLD_UPDATE_TTL_SECONDS`.
+
+## Logs To Watch
+Key logs: `[RECON]`, `[POSITION]`, `[POSITION MISMATCH]`, `[BUY SENT]`, `[TPSL TRIGGER]`, `[GROQ REFRESH]`, `[GHOST ORDER CLEANED]`.
+
+## Recommended Reading Order
+1. `README.md`, 2. `README_TR.md`, 3. `main.py`, 4. `core/reconciler.py`, 5. `core/tpsl_engine.py`.
 
 ## Safety Warning
-
 This project can place orders. Before using a real account:
 - test in sandbox,
 - observe multiple cycles in `DRY_RUN=true`,
+- read `bot.log`,
 - verify reconcile behavior before trusting live capital.
