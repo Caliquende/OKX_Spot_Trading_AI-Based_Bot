@@ -1,79 +1,260 @@
-# OKX Spot Trading Bot - Teknik Kılavuz
+# OKX Spot Trading Bot
 
-## Genel Bakış
-Teknik göstergeler, market rejimi tespiti ve deterministik execution (emir yürütme) prensiplerine dayalı modüler OKX spot trading botu. Sistem mimarisi, muhasebe bütünlüğü ve risk yönetimi tarafında yüksek denetlenebilirlik hedeflenerek tasarlanmıştır.
+[English README](./README.md)
 
-## Proje Yapısı ve Modül Fonksiyonları
+OKX spot piyasası için hazırlanmış; teknik sinyaller, market rejimi, deterministik execution kontrolleri, risk kontrolleri, TP/SL mantığı, Telegram takibi ve isteğe bağlı AI araştırma katmanını birleştiren modüler bir trading bot.
 
-### 1. Yürütme ve Orkestrasyon (`/`)
-- `main.py`: Giriş noktası. Sonsuz ticaret döngüsünü yönetir, cycle zamanlamasını koordine eder ve global istisnaları (exception) yakalar.
-- `desktop_app.py`: Bot durumunu ve logları izlemek için kullanılan isteğe bağlı grafik arayüz (GUI).
+Yasal Uyarı: Gerçek piyasalarda kullanılan bu tür sistemler finansal risk içerir.
 
-### 2. Çekirdek Ticaret Mantığı (`core/`)
-- `exchange.py`: OKX için düşük seviyeli CCXT wrapper katmanı. Özel/genel API çağrılarını, sayfalandırmayı (pagination) ve hata normalizasyonunu yönetir.
-- `execution_engine.py`: Atomik emir iletim katmanı. Client Order ID'lerini, soğuma kilitlerini (cooldown locks) ve dry-run simülasyonlarını yönetir. %100 branch coverage ile doğrulanmıştır.
-- `reconciler.py`: Muhasebe çekirdeği. Yerel state'i borsa bakiyeleri ve gerçekleşen emirler (fills) ile senkronize eder. Ortalama giriş fiyatını ve gerçekleşen kâr/zararı (PnL) yeniden hesaplar. 843 satırdan 167 satıra indirilerek sadeleştirilmiştir.
-- `tpsl_engine.py`: Çok aşamalı çıkış yönetimi. Zarar Durdur (SL), Kısmi TP, Tam TP, Başabaş (Break-Even) ve Trailing tetikleyicileri için canlı fiyatları izler.
-- `risk_manager.py`: Günlük maksimum zarar ve drawdown korumaları. Eşik değerler aşıldığında yeni girişleri engeller.
-- `portfolio_manager.py`: Toplam maruziyeti (exposure) ve varlık dağılımını hesaplar.
+## Güncel Durum
 
-### 3. Strateji ve İndikatörler (`strategy/`, `indicators/`)
-- `scoring_engine.py`: Teknik ve AI skorlarını birleştirerek AL/SAT/BEKLE kararları üretir.
-- `regime_engine.py`: Fiyat hareketlerini analiz ederek Trend, Yatay (Range) veya Volatil rejimlerini tespit eder.
-- `technical_indicators.py`: RSI, MACD, Bollinger Bantları vb. için özel veya kütüphane tabanlı hesaplamalar.
+Bu repo çalışan bir alpha sürümdür.
 
-### 4. Analiz ve Yapay Zeka (`analysis/`)
-- `rumor_analyzer.py`: Haber ve duygu analizi için Exa, CoinGecko ve Groq entegrasyonu.
-- `model_bridge.py`: LLM fallback zincirlerini yönetir (Örn: Groq hatasında OpenAI veya Llama modellerine geçiş).
+**Mantıksal Doğrulama Durumu:**
+- `strategy/regime_engine.py`: **%100 Branch Coverage**
+- `core/execution_engine.py`: **%100 Branch Coverage**
+- `core/tpsl_engine.py`: **%96 Branch Coverage**
+- `db/repositories.py`: **%90 Branch Coverage**
+- `core/reconciler.py`: **%90 Branch Coverage** (Yenilenmiş mimari)
 
-### 5. Veri Kalıcılığı (`db/`)
-- `database.py`: SQLite ilkleme, şema migrasyonları ve bağlantı yönetimi.
-- `repositories.py`: Veri erişim nesneleri:
-    - `OrdersRepo`: Durum takibi ve hayalet emir (ghost order) temizliği.
-    - `FillsRepo`: İşlem geçmişi ve kâr/zarar toplamları.
-    - `PositionsRepo`: Güncel açık pozisyon özetleri.
-    - `LocksRepo`: Sembol bazlı geçici işlem kilitleri.
-    - `BotStateRepo`: Streak ve rejim state'i için anahtar-değer depolama.
+Ana kullanım alanı:
+- öğrenme,
+- test,
+- iteratif geliştirme,
+- strateji ayarı.
 
-## Yapılandırma Parametreleri (.env)
+Kusursuz production-grade sistem olarak sunulmaz.
 
-### Risk Yönetimi
-- `MAX_OPEN_POSITIONS`: Maksimum eşzamanlı sembol sayısı.
-- `MAX_SYMBOL_EXPOSURE_PCT`: Bir sembole ayrılan maksimum sermaye yüzdesi.
-- `MAX_DAILY_REALIZED_LOSS_USDT`: Günlük zarar limiti (yeni girişleri durdurur).
-- `MAX_DAILY_DRAWDOWN_PCT`: Sermaye bazlı drawdown limiti.
+## Bot Ne Yapar?
 
-### TP/SL Yapılandırması
-- `STOP_LOSS_PCT`: Ortalama girişten itibaren sabit zarar durdurma yüzdesi.
-- `PARTIAL_TAKE_PROFIT_PCT`: %50 çıkışı tetikleyen kâr seviyesi.
-- `FULL_TAKE_PROFIT_PCT`: Tam çıkışı tetikleyen kâr seviyesi.
-- `BREAK_EVEN_STOP_ENABLED`: Kâr belirli bir noktaya ulaştığında SL'i giriş fiyatına çeker.
-- `TRAILING_TAKE_PROFIT_ENABLED`: Takip eden kâr al mantığını etkinleştirir.
+Her cycle'da kabaca şunları yapar:
 
-## Veritabanı Şema Detayları
+1. Exchange ve veritabanı sağlığını kontrol eder.
+2. Her sembol için OHLCV verisi çeker.
+3. Teknik indikatörleri hesaplar.
+4. TTL dolduysa AI research context'i yeniler.
+5. Market rejimini TREND, RANGE, CHOP veya VOLATILE olarak sınıflandırır.
+6. Teknik skor ve AI skoru üretir.
+7. Bu iki tarafın ortalamasıyla birleşik skor üretir.
+8. TP/SL, risk, lock ve execution kapılarından geçirir.
+9. Order, fill ve position state'ini SQLite içinde tekrar reconcile eder.
 
-- **orders**: `client_order_id`, `status` (PENDING, OPEN, FILLED, CANCELED), `qty`, `created_at_ms`.
-- **fills**: `trade_id`, `order_id`, `qty`, `price`, `realized_pnl_quote`, `exit_reason`.
-- **positions**: `symbol`, `qty`, `avg_entry_price`, `realized_pnl_quote`, `status`.
+## Son Büyük Değişiklikler
 
-## Test Metodolojisi
+Mevcut sürümde şu stratejik ve altyapısal iyileştirmeler vardır:
 
-Sistem, mantıksal doğrulama için `pytest` ve `pytest-cov` kullanır.
+- **Reconciler Yenilemesi:** Muhasebe mantığı (`reconciler.py`), 843 satırdan 167 satıra düşürülerek sadeleştirildi.
+- **Test Paketi:** `scratch/` dizini altında kapsamlı white-box testleri eklendi.
+- Spot pozisyon miktarında ana source of truth artık exchange balance tarafıdır.
+- Fill geçmişi daha çok ortalama giriş ve realized PnL için kullanılır.
+- Ghost order cleanup tarafı daha kontrollü ve daha az spam üretir.
+- AI model fallback zinciri `.env` üzerinden yönetilir.
+- AI refresh TTL `.env` üzerinden ayarlanır.
+- AI skor bandı artık `-24 .. 24` aralığındadır.
+- Varsayılan AI stance fallback skorları artık:
+  - `SELL = -8`
+  - `STRONG_SELL = -16`
+  - `BUY = 8`
+  - `STRONG_BUY = 16`
+- Birleşik skor artık:
+  - `(technical_score + ai_score) / 2`
+- TP/SL motoru artık:
+  - canlı mumun `high` değerini dikkate alır,
+  - break-even stop kullanabilir,
+  - trailing rollback koruması uygular.
 
-### `scratch/` İçindeki Test Senaryoları:
-- **Repositories:** Disk yan etkisi olmadan SQL bütünlüğünü test etmek için bellek içi SQLite (`:memory:`) kullanır.
-- **Execution Engine:** Borsa hata senaryolarını test etmek için mock exchange yanıtları kullanılır.
-- **Reconciler:** Borsa bakiyesi ile yerel veritabanı arasındaki "Uyumsuzluk" senaryoları simüle edilir.
+## Mimari
 
-### Komut
-```bash
-$env:PYTHONPATH="."
-pytest scratch/ -vv --cov-branch --cov-report=term-missing
+### Ana akış
+
+- `main.py` ana runtime döngüsünü yönetir.
+- `core/` exchange, execution, reconcile, risk, TP/SL, portfolio ve health mantığını içerir.
+- `strategy/` sinyal mapping ve rejim mantığını taşır.
+- `indicators/` teknik indikatörleri üretir.
+- `analysis/` CoinGecko, Exa ve Groq tabanlı AI araştırmasını yönetir.
+- `db/` kalıcı state ve muhasebe verisini tutar.
+- `reporting/` Telegram mesajlaşmasını yönetir.
+
+### Temel tasarım ilkesi
+
+Bot research ve skor şekillendirme tarafında AI desteklidir; execution güvenliği tarafında ise deterministik kalır.
+
+Yani:
+- AI sentiment ve threshold davranışını etkileyebilir,
+- ama order gönderimi, lock, reconcile ve muhasebe katmanı sıkı ve denetlenebilir kalmalıdır.
+
+## Ana Bileşenler
+
+### Exchange katmanı
+
+`core/exchange.py`, OKX ile ccxt üzerinden konuşur.
+
+### Execution katmanı
+
+`core/execution_engine.py`, daha önce verilmiş kararları güvenli biçimde uygular. %100 branch coverage ile doğrulanmıştır.
+
+### Reconcile katmanı
+
+`core/reconciler.py`, projenin en hassas parçalarından biridir. Sadeleştirilmiş mimari ile yeniden inşa edildi.
+
+Ana görevleri:
+- order state senkronu,
+- fill kayıtlarını yazma,
+- güncel pozisyonları yeniden üretme,
+- bot muhasebesini exchange state'ine yakın tutma.
+
+### Strategy katmanı
+
+- `strategy/scoring_engine.py`: skor -> action mapping
+- `strategy/regime_engine.py`: market rejimi tespiti
+
+### TP/SL katmanı
+
+`core/tpsl_engine.py` artık kârı daha iyi korumak için şu araçları kullanabilir:
+- stop loss,
+- partial take profit,
+- full take profit,
+- break-even stop,
+- trailing rollback koruması.
+
+### Araştırma katmanı
+
+`analysis/rumor_analyzer.py` şu kaynakları kullanabilir:
+- CoinGecko news,
+- Exa search,
+- Groq AI ve çok adımlı fallback zinciri.
+
+## Veritabanı
+
+SQLite kullanılır. Ana tablo rolleri:
+- `orders`: gönderilmiş order kayıtları
+- `fills`: gerçekleşmiş trade satırları
+- `positions`: güncel özet pozisyon state'i
+- `symbol_locks`: cooldown ve lock state'i
+- `bot_state`: streak, pending exit reason, regime state ve TP/SL state
+- `cycle_reports`: cycle özetleri
+
+## Ortam Ayarları
+
+Proje `.env` ve `_.env` okuyabilir.
+
+### Minimum gerekli alanlar
+
+```env
+OKX_API_KEY=your_key
+OKX_SECRET=your_secret
+OKX_PASSPHRASE=your_passphrase
+
+OKX_SANDBOX=true
+DRY_RUN=true
+
+SYMBOLS=BTC/USDT,ETH/USDT,SOL/USDT
+TIMEFRAME=15m
+LOOP_SECONDS=60
+DB_PATH=trading_bot.db
 ```
 
-### Doğrulanmış Kapsama Oranları
-- `regime_engine.py`: %100 Branch
-- `execution_engine.py`: %100 Branch
-- `tpsl_engine.py`: %96 Branch
-- `repositories.py`: %90 Branch
-- `reconciler.py`: %90 Branch
+### AI / research örneği
+
+```env
+LLM_ENABLED=true
+GROQ_API_KEY=your_groq_key
+
+GROQ_MODEL=groq/compound
+GROQ_FALLBACK_MODEL=openai/gpt-oss-120b
+GROQ_FALLBACK_FALLBACK_MODEL=llama-3.3-70b-versatile
+GROQ_FALLBACK_FALLBACK_FALLBACK_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+GROQ_FALLBACK_FALLBACK_FALLBACK_FALLBACK_MODEL=llama-3.1-8b-instant
+
+GROQ_CACHE_TTL_SECONDS=7200
+THRESHOLD_UPDATE_TTL_SECONDS=7200
+
+EXA_API_KEY=your_exa_key
+COINGECKO_DEMO_API_KEY=your_demo_key
+```
+
+### TP/SL örneği
+
+```env
+TPSL_ENABLED=true
+STOP_LOSS_PCT=0.06
+PARTIAL_TAKE_PROFIT_ENABLED=true
+PARTIAL_TAKE_PROFIT_PCT=0.04
+FULL_TAKE_PROFIT_ENABLED=true
+FULL_TAKE_PROFIT_PCT=0.08
+
+BREAK_EVEN_STOP_ENABLED=true
+BREAK_EVEN_ACTIVATION_PCT=0.03
+BREAK_EVEN_BUFFER_PCT=0.002
+
+TRAILING_TAKE_PROFIT_ENABLED=true
+TRAILING_TAKE_PROFIT_ACTIVATION_PCT=0.05
+TRAILING_TAKE_PROFIT_GIVEBACK_PCT=0.02
+```
+
+### Günlük risk guard örneği
+
+```env
+MAX_DAILY_REALIZED_LOSS_USDT=100
+MAX_DAILY_DRAWDOWN_PCT=0.08
+```
+
+## Çalıştırma
+
+```bash
+python main.py
+```
+
+### Testleri Çalıştır
+```bash
+$env:PYTHONPATH="."
+pytest scratch/ --cov=core --cov=db.repositories --cov=strategy --cov-branch --cov-report=term-missing
+```
+
+## Güvenli İlk Başlangıç
+
+İlk test için:
+
+```env
+OKX_SANDBOX=true
+DRY_RUN=true
+LLM_ENABLED=false
+```
+
+## Önemli Ayar Alanları
+
+### Risk ve sizing
+
+- `MIN_ORDER_QUOTE_USDT`, `MIN_FREE_USDT`, `MAX_OPEN_POSITIONS`, `MAX_SYMBOL_EXPOSURE_PCT`, `MAX_TOTAL_EXPOSURE_PCT`, `MAX_SINGLE_TRADE_PCT`, `MAX_DAILY_REALIZED_LOSS_USDT`, `MAX_DAILY_DRAWDOWN_PCT`.
+
+### Threshold'lar
+
+- `BUY_THRESHOLD`, `STRONG_BUY_THRESHOLD`, `SELL_THRESHOLD`, `STRONG_SELL_THRESHOLD`.
+
+### Scale-in
+
+- `SCALE_IN_ENABLED`, `SCALE_IN_TRIGGER_STREAK`, `STRONG_SCALE_IN_TRIGGER_STREAK`, `MAX_SCALE_IN_COUNT`.
+
+### TP/SL
+
+- `STOP_LOSS_PCT`, `PARTIAL_TAKE_PROFIT_PCT`, `FULL_TAKE_PROFIT_PCT`, `BREAK_EVEN_ACTIVATION_PCT`, `TRAILING_TAKE_PROFIT_ACTIVATION_PCT`, `TRAILING_TAKE_PROFIT_GIVEBACK_PCT`.
+
+### AI
+
+- `GROQ_MODEL`, `GROQ_FALLBACK_MODEL`, `GROQ_CACHE_TTL_SECONDS`, `THRESHOLD_UPDATE_TTL_SECONDS`.
+
+## İzlenecek Loglar
+
+Önemli loglar:
+- `[RECON]`, `[POSITION]`, `[POSITION MISMATCH]`, `[BUY SENT]`, `[TPSL TRIGGER]`, `[GROQ REFRESH]`, `[GHOST ORDER CLEANED]`.
+
+## Güvenlik Uyarısı
+
+Bu proje order gönderebilir.
+
+Gerçek hesaba geçmeden önce:
+- sandbox test et,
+- `DRY_RUN=true` ile birden fazla cycle izle,
+- muhafazakâr exposure ile başla,
+- `bot.log` dosyasını oku,
+- canlı sermayeye güvenmeden önce reconcile davranışını doğrula.
