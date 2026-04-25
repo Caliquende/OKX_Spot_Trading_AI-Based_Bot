@@ -10,8 +10,9 @@ Yasal Uyarı: Gerçek piyasalarda kullanılan bu tür sistemler finansal risk i�
 
 Bu repo, şu odaklara sahip gelişmiş bir alpha sürümdür:
 - **Kapsamlı white-box testleri ile doğrulanmış mantık akışı (ana modüllerde %95+ branch coverage).**
-- Yüksek denetlenebilirlik ve sadeleştirilmiş muhasebe (reconcile) katmanı.
+- **Yüksek denetlenebilirlik için sadeleştirilmiş ve yenilenmiş muhasebe (`reconciler.py`) katmanı.**
 - İteratif geliştirme ve strateji optimizasyonu.
+- Kusursuz bir production-grade sistem olarak sunulmaz; öğrenme ve test odaklıdır.
 
 ## Bot Ne Yapar?
 
@@ -29,35 +30,26 @@ Her cycle'da kabaca şunları yapar:
 
 ## Yapısal İyileştirmeler
 
-- **Reconciler Yenilemesi:** Muhasebe mantığı (`reconciler.py`), daha yüksek okunabilirlik ve hata yönetimi için 843 satırdan 167 satıra düşürülerek sadeleştirildi.
+Mevcut sürümde şu yapısal ve mantıksal iyileştirmeler yapılmıştır:
+
+- **Reconciler Yenilemesi:** Muhasebe mantığı, 843 satırdan 167 satıra düşürülerek daha güvenilir ve bakımı kolay hale getirildi.
 - **Yüksek Test Kapsamı:** `ExecutionEngine`, `TPSLEngine` ve `RegimeEngine` modüllerinde %95-100 arası branch coverage başarısına ulaşıldı.
 - **Veri Bütünlüğü:** Repository katmanı, bellek içi (in-memory) SQLite test paketleri ile SQL bazında doğrulandı.
-- **Pozisyon Tutarlılığı:** Açık pozisyon miktarı için borsa bakiyesi (exchange balance) birincil kaynak olarak kullanılır.
+- **Pozisyon Tutarlılığı:** Açık pozisyon miktarı için borsa bakiyesi (exchange balance) esas alınır.
+- **TP/SL Gelişmiş Koruma:** Canlı mumun `high` değerini dikkate alan kar al, başabaş stop ve trailing koruması eklendi.
 
 ## Mimari
 
 ### Ana akış
-
 - `main.py` ana runtime döngüsünü yönetir.
 - `core/` exchange, execution, reconcile, risk, TP/SL ve portfolio mantığını içerir.
 - `strategy/` sinyal mapping ve rejim mantığını taşır.
 - `indicators/` teknik indikatörleri üretir.
+- `analysis/` AI araştırma katmanını yönetir.
 - `db/` kalıcı state ve muhasebe verisini tutar.
 
 ### Temel tasarım ilkesi
-
 Bot research tarafında AI desteklidir; ancak execution güvenliği deterministik kalır. Order gönderimi, kilitler ve muhasebe katmanı sıkı ve denetlenebilir bir yapıdadır.
-
-## Ana Bileşenler
-
-### Reconcile Katmanı (`core/reconciler.py`)
-Projenin en hassas parçasıdır. Botun muhasebesini borsa durumuyla eşitlemek için order senkronu, fill kayıtları ve pozisyon inşasını yönetir.
-
-### Execution Katmanı (`core/execution_engine.py`)
-Kararları borsa emirlerine dönüştürür; cooldown ve lock yönetimini sıkı bir şekilde uygular.
-
-### TP/SL Katmanı (`core/tpsl_engine.py`)
-Stop Loss, Kısmi/Tam Kar Al, Başabaş Stop ve Trailing koruması ile kârı korur.
 
 ## Test Süreci
 
@@ -76,9 +68,9 @@ pytest scratch/ --cov=core --cov=db.repositories --cov=strategy --cov-branch --c
 - `db/repositories.py`: **%90 Branch Coverage** (Bellek içi SQLite tescilli)
 - `core/reconciler.py`: **%90 Branch Coverage**
 
-## Ortam Ayarları
+## Ortam Ayarları (.env)
 
-Proje `.env` ve `_.env` dosyalarını okur. Minimum gerekli alanlar:
+### Minimum Gerekli Alanlar
 ```env
 OKX_API_KEY=key
 OKX_SECRET=secret
@@ -88,12 +80,20 @@ DRY_RUN=true
 SYMBOLS=BTC/USDT,ETH/USDT
 TIMEFRAME=15m
 LOOP_SECONDS=60
-DB_PATH=trading_bot.db
+```
+
+### Risk ve TP/SL Örneği
+```env
+MAX_OPEN_POSITIONS=3
+MAX_DAILY_REALIZED_LOSS_USDT=100
+STOP_LOSS_PCT=0.06
+FULL_TAKE_PROFIT_PCT=0.08
+TRAILING_TAKE_PROFIT_ENABLED=true
 ```
 
 ## Güvenlik Uyarısı
 
-Gerçek hesaba geçmeden önce:
+Bu proje borsa üzerinde emir verebilir. Gerçek hesaba geçmeden önce:
 - sandbox üzerinde test edin,
 - `DRY_RUN=true` ile sistemi izleyin,
 - canlı sermayeye güvenmeden önce muhasebe (reconcile) davranışını doğrulayın.

@@ -10,8 +10,9 @@ Legal Disclaimer: Systems used in live markets carry financial risk.
 
 This repository is a focused alpha with:
 - **Logic verification through extensive white-box testing (95%+ branch coverage on core modules).**
-- Refactored accounting layer for high auditability and simplified reconciliation.
+- **Refactored accounting layer (`reconciler.py`) simplified from 843 to 167 lines for high auditability.**
 - Strategy tuning and iterative development.
+- It is not presented as a guaranteed production-grade system.
 
 ## What The Bot Does
 
@@ -27,12 +28,18 @@ On each cycle, the bot broadly does the following:
 8. Applies TP/SL, risk, lock, and execution gates.
 9. Reconciles orders, fills, and positions back into SQLite state.
 
-## Recent Structural Improvements
+## What Changed Recently
 
-- **Reconciler Refactoring:** Core accounting logic (`reconciler.py`) simplified from 843 to 167 lines for better maintainability.
+The current version reflects recent structural and logic hardening:
+
+- **Reconciler Refactoring:** Core accounting logic simplified for better maintainability and error handling.
 - **High Test Coverage:** Achieved 95%-100% branch coverage across `ExecutionEngine`, `TPSLEngine`, and `RegimeEngine`.
 - **Database Integrity:** Repositories now verified via in-memory SQLite test suites.
-- **Spot Consistency:** Exchange balance is used as the primary source of truth for open quantity.
+- Spot position quantity now follows exchange balance as the main source of truth.
+- Fill history is mainly used for average entry and realized PnL.
+- Ghost order cleanup is less noisy and state-aware.
+- AI model fallback chain and refresh TTL are configurable from `.env`.
+- TP/SL logic now includes candle-high-aware take profit detection, break-even stop logic, and trailing rollback protection.
 
 ## Architecture
 
@@ -42,23 +49,28 @@ On each cycle, the bot broadly does the following:
 - `core/` contains exchange, execution, reconcile, risk, TP/SL, portfolio, and health logic.
 - `strategy/` contains signal mapping and regime logic.
 - `indicators/` builds technical indicators.
-- `analysis/` contains AI research.
+- `analysis/` contains CoinGecko, Exa, and Groq-based AI research.
 - `db/` stores persistent state and accounting data.
+- `reporting/` handles Telegram messaging.
 
 ### Design principle
 
-The bot is AI-assisted in research, but execution safety is deterministic. Order submission, locks, and accounting remain strict and auditable.
+The bot is AI-assisted in research and score shaping, but execution safety is deterministic.
+Order submission, locks, reconciliation, and accounting remain strict and auditable.
 
 ## Core Components
 
-### Reconcile layer (`core/reconciler.py`)
-One of the most sensitive parts. Syncs order state, writes fills into the database, and rebuilds current positions to align bot accounting with the exchange.
+### Exchange layer
+`core/exchange.py` talks to OKX through ccxt.
 
-### Execution layer (`core/execution_engine.py`)
-Safely translates decisions into exchange orders with strict lock and cooldown management.
+### Execution layer
+`core/execution_engine.py` applies already-made decisions safely. Verified with 100% branch coverage.
 
-### TP/SL layer (`core/tpsl_engine.py`)
-Protects profits with Stop Loss, Partial/Full Take Profit, Break-Even Stop, and Trailing Protection.
+### Reconcile layer
+`core/reconciler.py` is the sensitive accounting core. Syncs order state, writes fills, and rebuilds positions. Simplified for high reliability.
+
+### TP/SL layer
+`core/tpsl_engine.py` protects profits with Stop Loss, Partial/Full Take Profit, Break-Even Stop, and Trailing Protection.
 
 ## Testing
 
@@ -74,12 +86,10 @@ pytest scratch/ --cov=core --cov=db.repositories --cov=strategy --cov-branch --c
 - `strategy/regime_engine.py`: **100% Branch Coverage**
 - `core/execution_engine.py`: **100% Branch Coverage**
 - `core/tpsl_engine.py`: **96% Branch Coverage**
-- `db/repositories.py`: **90% Branch Coverage** (In-memory SQL verified)
+- `db/repositories.py`: **90% Branch Coverage** (Verified with in-memory SQLite)
 - `core/reconciler.py`: **90% Branch Coverage**
 
 ## Environment Configuration
-
-The project reads `.env` and `_.env`.
 
 ### Minimum required fields
 ```env
@@ -94,9 +104,38 @@ LOOP_SECONDS=60
 DB_PATH=trading_bot.db
 ```
 
+### AI / research example
+```env
+LLM_ENABLED=true
+GROQ_API_KEY=your_groq_key
+GROQ_MODEL=groq/compound
+GROQ_FALLBACK_MODEL=openai/gpt-oss-120b
+GROQ_FALLBACK_FALLBACK_MODEL=llama-3.3-70b-versatile
+GROQ_CACHE_TTL_SECONDS=7200
+EXA_API_KEY=your_exa_key
+```
+
+### TP/SL example
+```env
+TPSL_ENABLED=true
+STOP_LOSS_PCT=0.06
+PARTIAL_TAKE_PROFIT_PCT=0.04
+FULL_TAKE_PROFIT_PCT=0.08
+BREAK_EVEN_STOP_ENABLED=true
+TRAILING_TAKE_PROFIT_ENABLED=true
+```
+
+## Important Config Areas
+
+### Risk and sizing
+- `MAX_OPEN_POSITIONS`, `MAX_SYMBOL_EXPOSURE_PCT`, `MAX_TOTAL_EXPOSURE_PCT`, `MAX_DAILY_REALIZED_LOSS_USDT`, `MAX_DAILY_DRAWDOWN_PCT`.
+
+### Scale-in
+- `SCALE_IN_ENABLED`, `SCALE_IN_TRIGGER_STREAK`, `MAX_SCALE_IN_COUNT`.
+
 ## Safety Warning
 
-Before using a real account:
+This project can place orders. Before using a real account:
 - test in sandbox,
 - observe multiple cycles in `DRY_RUN=true`,
 - verify reconcile behavior before trusting live capital.
