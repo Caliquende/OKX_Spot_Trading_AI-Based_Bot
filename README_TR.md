@@ -1,8 +1,8 @@
-# OKX Spot Trading Bot
+# OKX Spot Trading AI-Based Bot
 
 [English README](./README.md)
 
-Bu repo, OKX spot piyasası için geliştirilmiş modüler bir Python trading botudur. Bot; teknik indikatörler, market rejimi tespiti, deterministik risk ve execution kontrolleri, TP/SL mantığı, SQLite tabanlı state takibi, Telegram bildirimleri ve isteğe bağlı AI destekli research katmanını birlikte kullanır.
+Bu repo, OKX spot piyasası için geliştirilmiş modüler bir Python trading botudur. Bot; teknik indikatörler, market rejimi tespiti, deterministik risk ve execution kontrolleri, TP/SL mantığı, SQLite tabanlı state takibi, Telegram bildirimleri, Tkinter tabanlı masaüstü kontrol paneli ve isteğe bağlı AI destekli research katmanını birlikte kullanır.
 
 Bu proje canlı emir gönderebilir. Canlı hesapta kullanmadan önce `OKX_SANDBOX=true` ve `DRY_RUN=true` ile test etmek gerekir.
 
@@ -51,7 +51,15 @@ Kod tabanındaki mevcut yapıya göre botun ana amacı şudur:
 - `scratch/`: hedefli coverage/test script'leri
 - `logs/`: çalışma anında üretilen loglar
 
-## Bağımlılıklar
+## Gereksinimler
+
+- Python 3.11+ önerilir
+- OKX API bilgileri
+- SQLite, Python ile birlikte gelir
+- Bildirimler ve uzaktan kontrol için isteğe bağlı Telegram bot token ve chat ID
+- AI/research özellikleri için isteğe bağlı Groq, Exa ve CoinGecko bilgileri
+
+## Python Bağımlılıkları
 
 `requirements.txt` içinde görünen paketler:
 
@@ -65,7 +73,7 @@ Masaüstü uygulama için ayrı paket görünmüyor; bu tutarlı çünkü `deskt
 
 ## Kurulum
 
-Python sürümü repo içinde açıkça pinlenmemiş. Kod tabanı `from __future__ import annotations`, `dataclass`, `zoneinfo` ve modern type hint kullanıyor; pratikte güncel bir Python 3.11+ ortamı tercih etmek daha güvenli olur. Bu, kod stilinden çıkarımdır; repoda zorunlu minimum sürümü yazan ayrı bir dosya görünmüyor.
+Python sürümü repo içinde açıkça pinlenmemiş. Kod tabanı `from __future__ import annotations`, `dataclass`, `zoneinfo` ve modern type hint kullanıyor; pratikte güncel bir Python 3.11+ ortamı tercih etmek daha güvenli olur.
 
 Örnek kurulum:
 
@@ -234,6 +242,7 @@ Kaynak dosyalara göre görünen sınırlar:
 - Masaüstü uygulama ilk sürüm kontrol paneli; paketlenmiş `.exe` değil.
 - AI research katmanı dış servis ve API anahtarlarına bağlı; başarısızlıklar için fallback mantığı var ama bu katman deterministik değil.
 - Gerçek pozisyon doğruluğu açısından kritik katman `core/reconciler.py`; bu nedenle canlı kullanımdan önce reconcile davranışı özellikle izlenmeli.
+- `scratch/` script'leri geliştirme kontrolleri için faydalıdır; ancak formal bir CI test paketi değildir.
 
 ## Güvenli Doğrulama Akışı
 
