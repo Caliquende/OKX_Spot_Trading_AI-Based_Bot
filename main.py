@@ -47,6 +47,7 @@ import time
 import traceback
 import datetime
 from logging.handlers import RotatingFileHandler
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import ccxt
@@ -82,7 +83,7 @@ from db.repositories import OrdersRepo, FillsRepo, PositionsRepo, LocksRepo, Bot
 from indicators.indicator_engine import calculate_indicators
 from reporting.telegram_bot import TelegramNotifier
 from strategy.regime_engine import detect_market_regime, resolve_regime_params
-from strategy.scoring_engine import calculate_indicator_score, evaluate_signal
+from strategy.scoring_engine import calculate_indicator_score, evaluate_signal, apply_regime_execution_policy
 
 LOCAL_TZ = ZoneInfo("Europe/Istanbul")
 
@@ -882,6 +883,107 @@ def get_free_base_qty(exchange: OKXExchange, symbol: str) -> float:
         return 0.0
 
 
+def parse_optional_positive_float(parts: list[str], index: int, default: float, name: str) -> float:
+    if len(parts) <= index:
+        return float(default)
+    try:
+        value = float(parts[index])
+    except Exception:
+        raise ValueError(f"{name} must be numeric")
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0")
+    return value
+
+
+def find_dust_balances(
+    *,
+    exchange: OKXExchange,
+    symbols: list[str],
+    max_value_usdt: float,
+    min_order_quote_usdt: float,
+) -> list[dict[str, Any]]:
+    """
+    Exchange free balance uzerinden dust adaylarini bulur.
+
+    /positions DB pozisyon state'ini gosterir; dust ise pozisyon sayilmayacak
+    kadar kucuk serbest bakiyedir. Bu yuzden kaynak olarak exchange balance
+    kullanilir.
+    """
+    balance = exchange.fetch_balance()
+    candidates: list[dict[str, Any]] = []
+    seen_assets: set[str] = set()
+
+    for symbol in symbols:
+        try:
+            base_asset, quote_asset = symbol.split("/")
+        except ValueError:
+            continue
+        if quote_asset.upper() != "USDT" or base_asset.upper() == "USDT":
+            continue
+        if base_asset in seen_assets:
+            continue
+        seen_assets.add(base_asset)
+
+        free_qty = float(exchange.get_asset_free(base_asset, balance=balance) or 0.0)
+        if free_qty <= 1e-12:
+            continue
+
+        try:
+            ticker = exchange.fetch_ticker(symbol)
+            reference_price, price_source = extract_reference_price(ticker)
+        except Exception as exc:
+            candidates.append(
+                {
+                    "symbol": symbol,
+                    "asset": base_asset,
+                    "free_qty": free_qty,
+                    "price": 0.0,
+                    "value_usdt": 0.0,
+                    "price_source": "unavailable",
+                    "cleanable": False,
+                    "reason": f"price_unavailable:{str(exc)[:80]}",
+                }
+            )
+            continue
+
+        value_usdt = free_qty * reference_price
+        if value_usdt <= 0 or value_usdt > max_value_usdt:
+            continue
+
+        candidates.append(
+            {
+                "symbol": symbol,
+                "asset": base_asset,
+                "free_qty": free_qty,
+                "price": reference_price,
+                "value_usdt": value_usdt,
+                "price_source": price_source,
+                "cleanable": value_usdt >= min_order_quote_usdt,
+                "reason": "ok" if value_usdt >= min_order_quote_usdt else "below_min_order_quote",
+            }
+        )
+
+    return sorted(candidates, key=lambda item: float(item.get("value_usdt") or 0.0), reverse=True)
+
+
+def format_dust_balances(candidates: list[dict[str, Any]], max_value_usdt: float) -> str:
+    if not candidates:
+        return f"[DUST]\nnone <= {max_value_usdt:.2f} USDT"
+
+    lines = [f"[DUST] max_value={max_value_usdt:.2f} USDT"]
+    for item in candidates:
+        status = "cleanable" if item.get("cleanable") else f"skip:{item.get('reason')}"
+        lines.append(
+            (
+                f"{item['symbol']} {status}\n"
+                f"qty={float(item['free_qty']):.8f}\n"
+                f"value={float(item['value_usdt']):.4f} USDT\n"
+                f"price={float(item['price']):.8f} ({item['price_source']})"
+            )
+        )
+    return "\n\n".join(lines)
+
+
 def local_trading_day_context(now_ms: int | None = None) -> tuple[str, int]:
     """
     TR: Istanbul gunu icin hem day_key hem de UTC bazli day-start timestamp uretir.
@@ -1195,6 +1297,89 @@ def handle_force_command(
                 "[POSITIONS]\n\n" + "\n\n".join(lines)
             )
 
+            return
+
+        # -------------------------
+        # DUST BALANCES
+        # -------------------------
+
+        if cmd == "/dust":
+            max_value_usdt = parse_optional_positive_float(parts, 1, 5.0, "max_value_usdt")
+            candidates = find_dust_balances(
+                exchange=exchange,
+                symbols=settings.symbols,
+                max_value_usdt=max_value_usdt,
+                min_order_quote_usdt=float(settings.min_order_quote_usdt),
+            )
+            notify_safe(notifier, format_dust_balances(candidates, max_value_usdt))
+            return
+
+        # -------------------------
+        # DUST CLEAN
+        # -------------------------
+
+        if cmd == "/dust_clean":
+            max_value_usdt = parse_optional_positive_float(parts, 1, 5.0, "max_value_usdt")
+            candidates = find_dust_balances(
+                exchange=exchange,
+                symbols=settings.symbols,
+                max_value_usdt=max_value_usdt,
+                min_order_quote_usdt=float(settings.min_order_quote_usdt),
+            )
+            cleanable = [item for item in candidates if item.get("cleanable")]
+
+            if not cleanable:
+                notify_safe(notifier, format_dust_balances(candidates, max_value_usdt) + "\n\n[DUST CLEAN] no cleanable balances")
+                return
+
+            result_lines = [f"[DUST CLEAN] max_value={max_value_usdt:.2f} USDT"]
+            for item in cleanable:
+                symbol = str(item["symbol"])
+                qty = float(item["free_qty"])
+                result = execution.force_sell(
+                    symbol,
+                    qty,
+                    reason=f"dust_clean value={float(item['value_usdt']):.4f} max={max_value_usdt:.2f}",
+                )
+                logging.info(
+                    "[DUST CLEAN RESULT] symbol=%s qty=%.8f value_usdt=%.4f result=%s",
+                    symbol,
+                    qty,
+                    float(item["value_usdt"]),
+                    result,
+                )
+
+                if result and result.get("ok"):
+                    bot_state_repo.set(
+                        f"pending_exit_reason:{symbol}",
+                        {"reason": "dust_clean", "client_order_id": result.get("client_order_id")},
+                        int(time.time() * 1000),
+                    )
+                    reset_signal_streak(
+                        bot_state_repo,
+                        signal_state,
+                        symbol,
+                        "dust_clean",
+                    )
+                    result_lines.append(
+                        f"{symbol} sell_sent qty={qty:.8f} value={float(item['value_usdt']):.4f} USDT"
+                    )
+                else:
+                    reason = (result or {}).get("reason", "unknown")
+                    result_lines.append(
+                        f"{symbol} failed qty={qty:.8f} value={float(item['value_usdt']):.4f} USDT reason={reason}"
+                    )
+
+            skipped = [item for item in candidates if not item.get("cleanable")]
+            if skipped:
+                result_lines.append("")
+                result_lines.append("Skipped:")
+                for item in skipped:
+                    result_lines.append(
+                        f"{item['symbol']} value={float(item['value_usdt']):.4f} reason={item.get('reason')}"
+                    )
+
+            notify_safe(notifier, "\n".join(result_lines))
             return
 
 
@@ -2029,6 +2214,36 @@ def main() -> None:
                         f"[DEBUG SCORE] symbol={symbol} indicator={indicator_score}, ai_score={ai_score}, effective_ai_score={effective_ai_score}, ai_diag={ai_score_diag}, details={indicator_details}, rumor={rumor}, total={total_score}"
                     )
                     signal = evaluate_signal(total_score, regime_params)
+                    position_pnl_pct = None
+                    if has_position:
+                        try:
+                            _avg_for_policy = float((position or {}).get("avg_entry_price") or 0.0)
+                            if _avg_for_policy > 0 and last_price > 0:
+                                position_pnl_pct = (float(last_price) / _avg_for_policy) - 1.0
+                        except Exception:
+                            position_pnl_pct = None
+                    policy_signal, policy_reason = apply_regime_execution_policy(
+                        signal=signal,
+                        score=total_score,
+                        regime_params=regime_params,
+                        regime_diag=regime_diag,
+                        indicator_details=indicator_details,
+                        ai_diag=ai_score_diag,
+                        has_position=has_position,
+                        position_pnl_pct=position_pnl_pct,
+                    )
+                    if policy_signal != signal or policy_reason != "policy_ok":
+                        logging.info(
+                            "[REGIME POLICY] %s regime=%s trend_bias=%s reason=%s before=%s after=%s pnl_pct=%s",
+                            symbol,
+                            regime,
+                            regime_diag.get("trend_bias"),
+                            policy_reason,
+                            signal,
+                            policy_signal,
+                            position_pnl_pct,
+                        )
+                    signal = policy_signal
                     ai_tag = " [AI_THRESHOLDS]" if regime_params.get("ai_adjusted") else ""
                     logging.info(f"[DEBUG SIGNAL]{ai_tag} {symbol} signal={signal}")
 

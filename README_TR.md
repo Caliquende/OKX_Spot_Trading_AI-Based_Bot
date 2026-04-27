@@ -124,9 +124,9 @@ Bu projede Telegram yalnızca bildirim kanalı değildir. `TELEGRAM_TOKEN` ve `T
 
 Mevcut kodda görünen örnek komutlar:
 
-- Durum ve inceleme: `/status`, `/health`, `/positions`, `/params`, `/streaks`, `/pnl`, `/daily_pnl`, `/exit_stats`, `/price_debug`
+- Durum ve inceleme: `/status`, `/health`, `/positions`, `/dust [max_usdt]`, `/params`, `/streaks`, `/pnl`, `/daily_pnl`, `/exit_stats`, `/price_debug`
 - Manuel kontrol: `/trigger`, `/force_refresh`, `/reconcile`
-- Yüksek etkili kontroller: `/close_all`, `/panic`, `/pause_trading`, `/resume_trading`
+- Yüksek etkili kontroller: `/dust_clean [max_usdt]`, `/close_all`, `/panic`, `/pause_trading`, `/resume_trading`
 
 Bu nedenle Telegram erişimini yalnızca alert kanalı gibi değil, operasyonel kontrol yüzeyi gibi değerlendirmek gerekir.
 

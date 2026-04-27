@@ -197,3 +197,105 @@ def evaluate_signal(score: float, regime_params: dict[str, Any] | None = None):
         "fraction": 0.0,
         "stance": "HOLD",
     }
+
+
+def apply_regime_execution_policy(
+    signal: dict[str, Any],
+    score: float,
+    regime_params: dict[str, Any] | None = None,
+    regime_diag: dict[str, Any] | None = None,
+    indicator_details: dict[str, Any] | None = None,
+    ai_diag: dict[str, Any] | None = None,
+    has_position: bool = False,
+    position_pnl_pct: float | None = None,
+) -> tuple[dict[str, Any], str]:
+    """
+    Rejim bazlı son karar katmanı.
+
+    evaluate_signal ham skoru aksiyona çevirir. Bu fonksiyon o aksiyonu piyasa
+    rejimine göre filtreler veya risk azaltma tarafında sertleştirir.
+    """
+    params = _resolve_signal_params(regime_params)
+    regime_params = regime_params or {}
+    regime_diag = regime_diag or {}
+    indicator_details = indicator_details or {}
+    ai_diag = ai_diag or {}
+
+    adjusted = dict(signal)
+    action = str(adjusted.get("action") or "HOLD").upper()
+    regime = str(regime_params.get("regime") or regime_diag.get("regime") or "BASE").upper()
+    trend_bias = str(regime_diag.get("trend_bias") or "").upper()
+    effective_ai_score = float(ai_diag.get("effective") or 0.0)
+    weak_catalyst = bool(ai_diag.get("weak_catalyst"))
+    buy_threshold = float(params["buy_threshold"])
+    strong_buy_threshold = float(params["strong_buy_threshold"])
+
+    rsi_signal = float(indicator_details.get("rsi") or 0.0)
+    stoch_signal = float(indicator_details.get("stochrsi") or 0.0)
+    bollinger_signal = float(indicator_details.get("bollinger") or 0.0)
+    ema_trend_signal = float(indicator_details.get("ema_trend") or 0.0)
+    ema_slope_signal = float(indicator_details.get("ema_slope") or 0.0)
+    price_vs_ema50_signal = float(indicator_details.get("price_vs_ema50") or 0.0)
+
+    def hold(reason: str) -> tuple[dict[str, Any], str]:
+        return {"action": "HOLD", "fraction": 0.0, "stance": "HOLD"}, reason
+
+    def promote_full_close(reason: str) -> tuple[dict[str, Any], str]:
+        promoted = dict(adjusted)
+        promoted.update({"action": "FULL_CLOSE", "fraction": 1.0, "stance": "STRONG_SELL"})
+        return promoted, reason
+
+    # Zarar büyüdüğünde kademeli çıkış yerine tam risk azaltma.
+    # Eski loglarda ana zarar indicator_partial_close zincirinden geldi.
+    if has_position and action == "PARTIAL_CLOSE" and position_pnl_pct is not None:
+        pnl = float(position_pnl_pct)
+        if pnl <= -0.025 and regime in {"CHOP", "VOLATILE"}:
+            return promote_full_close(f"policy_full_close_loser_{regime.lower()}")
+        if pnl <= -0.018 and trend_bias == "DOWN":
+            return promote_full_close("policy_full_close_loser_down_bias")
+
+    if action not in {"BUY", "STRONG_BUY"}:
+        return adjusted, "policy_ok"
+
+    # TREND: yukarı trendde momentum serbest, aşağı trendde sadece güçlü ters dönüş.
+    if regime == "TREND":
+        if trend_bias == "DOWN":
+            if action != "STRONG_BUY" or score < strong_buy_threshold or effective_ai_score <= 0:
+                return hold("policy_block_trend_down_without_strong_reversal")
+        return adjusted, "policy_ok_trend"
+
+    # RANGE: mean-reversion trade. Dip/alt bant kanıtı yoksa kovalamayı engelle.
+    if regime == "RANGE":
+        mean_reversion_evidence = rsi_signal > 0 or stoch_signal > 0 or bollinger_signal > 0
+        if not mean_reversion_evidence:
+            return hold("policy_block_range_without_mean_reversion")
+        if weak_catalyst and effective_ai_score < 0 and score < strong_buy_threshold:
+            return hold("policy_block_range_weak_negative_ai")
+        return adjusted, "policy_ok_range"
+
+    # CHOP: fırsat kapısı açık ama yalnızca yüksek conviction.
+    if regime == "CHOP":
+        if score < strong_buy_threshold:
+            return hold("policy_block_chop_needs_strong_score")
+        if trend_bias == "DOWN" and effective_ai_score < 0:
+            return hold("policy_block_chop_down_bias_negative_ai")
+        adjusted["fraction"] = min(float(adjusted.get("fraction") or 0.0), float(params["buy_pct"]))
+        return adjusted, "policy_ok_chop_reduced_size"
+
+    # VOLATILE: breakout/continuation şartı. Düşen volatilitede dip yakalama kapalı.
+    if regime == "VOLATILE":
+        trend_confirmation = (
+            trend_bias == "UP"
+            and ema_trend_signal > 0
+            and (ema_slope_signal > 0 or price_vs_ema50_signal > 0)
+        )
+        strong_reversal = action == "STRONG_BUY" and score >= strong_buy_threshold and effective_ai_score > 0
+        if not trend_confirmation and not strong_reversal:
+            return hold("policy_block_volatile_without_breakout_confirmation")
+        adjusted["fraction"] = min(float(adjusted.get("fraction") or 0.0), float(params["buy_pct"]))
+        return adjusted, "policy_ok_volatile_reduced_size"
+
+    # BASE: ham sinyali koru, ama minimum buy threshold altında zaten evaluate_signal BUY üretmez.
+    if score < buy_threshold:
+        return hold("policy_block_base_below_buy_threshold")
+    return adjusted, "policy_ok_base"

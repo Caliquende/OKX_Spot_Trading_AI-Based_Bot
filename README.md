@@ -124,9 +124,9 @@ Telegram is not only a notifier in this project. `main.py` polls Telegram update
 
 Examples visible in the current code:
 
-- Status and inspection: `/status`, `/health`, `/positions`, `/params`, `/streaks`, `/pnl`, `/daily_pnl`, `/exit_stats`, `/price_debug`
+- Status and inspection: `/status`, `/health`, `/positions`, `/dust [max_usdt]`, `/params`, `/streaks`, `/pnl`, `/daily_pnl`, `/exit_stats`, `/price_debug`
 - Manual control: `/trigger`, `/force_refresh`, `/reconcile`
-- High-impact controls: `/close_all`, `/panic`, `/pause_trading`, `/resume_trading`
+- High-impact controls: `/dust_clean [max_usdt]`, `/close_all`, `/panic`, `/pause_trading`, `/resume_trading`
 
 Treat Telegram command access as an operational control surface, not just an alert channel.
 
