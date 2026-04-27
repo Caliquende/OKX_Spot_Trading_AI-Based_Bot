@@ -1,8 +1,8 @@
-# OKX Spot Trading Bot
+# OKX Spot Trading AI-Based Bot
 
 [Turkish README](./README_TR.md)
 
-This repository is a modular Python trading bot for the OKX spot market. It combines technical indicators, market regime detection, deterministic risk and execution controls, TP/SL logic, SQLite-backed state tracking, Telegram notifications, and an optional AI-assisted research layer.
+This repository is a modular Python trading bot for the OKX spot market. It combines technical indicators, market regime detection, deterministic risk and execution controls, TP/SL logic, SQLite-backed state tracking, Telegram notifications, a Tkinter desktop control panel, and an optional AI-assisted research layer.
 
 This project can place live orders. Before using a real account, test with `OKX_SANDBOX=true` and `DRY_RUN=true`.
 
@@ -51,7 +51,15 @@ Important folders and files:
 - `scratch/`: targeted coverage and test scripts
 - `logs/`: runtime logs
 
-## Dependencies
+## Requirements
+
+- Python 3.11+ recommended
+- OKX API credentials
+- SQLite, included with Python
+- Optional Telegram bot token and chat ID for notifications and remote controls
+- Optional Groq, Exa, and CoinGecko credentials for AI/research features
+
+## Python Dependencies
 
 Packages currently listed in `requirements.txt`:
 
@@ -65,7 +73,7 @@ There is no separate desktop dependency listed. That is consistent with `desktop
 
 ## Setup
 
-The repo does not pin a Python version explicitly. The codebase uses `from __future__ import annotations`, `dataclass`, `zoneinfo`, and modern typing, so Python 3.11+ is the safer practical choice. That is an inference from the code style; there is no file in the repo that declares a hard minimum version.
+The repo does not pin a Python version explicitly. The codebase uses `from __future__ import annotations`, `dataclass`, `zoneinfo`, and modern typing, so Python 3.11+ is the safer practical choice.
 
 Example setup:
 
@@ -234,6 +242,7 @@ From the current source files:
 - The desktop application is an initial control panel, not a packaged `.exe`.
 - The AI research layer depends on external APIs and services. It has fallback logic, but it is not deterministic.
 - `core/reconciler.py` is critical for position correctness. Its behavior should be watched closely before trusting live capital.
+- `scratch/` scripts are useful development checks, but they are not a formal CI suite.
 
 ## Safe Validation Flow
 
