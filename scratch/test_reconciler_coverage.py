@@ -88,7 +88,7 @@ def test_apply_fill_accounting_various_fees(reconciler):
     assert q == 0.99
     # fee in base_asset for sell
     q, a, p, f = reconciler._apply_fill_accounting(side="sell", fill_qty=1, fill_price=110, fill_cost=110, fee_cost=0.01, fee_ccy="BTC", base_asset="BTC", quote_asset="USDT", current_qty=1, current_avg=100)
-    assert pytest.approx(p) == 9.0 # (110-100)*1 - (0.01*110)
+    assert pytest.approx(p) == 8.9 # (110-100)*1 - (0.01*110)
 
 def test_rebuild_position_sandbox_fills_ignore(reconciler, mock_deps):
     mock_deps["exchange"].ex.sandbox = True

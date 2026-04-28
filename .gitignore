@@ -24,6 +24,7 @@ logs/
 # Test / coverage
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
 
 # Type checker / linter caches
@@ -39,4 +40,3 @@ htmlcov/
 # OS files
 .DS_Store
 Thumbs.db
-/scratch/*

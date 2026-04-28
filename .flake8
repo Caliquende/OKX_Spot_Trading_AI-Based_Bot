@@ -1,0 +1,17 @@
+[flake8]
+max-line-length = 120
+extend-ignore = E203, W503
+exclude =
+    .git,
+    __pycache__,
+    docs/source/conf.py,
+    old,
+    build,
+    dist,
+    .venv,
+    .pytest_cache,
+    logs
+max-complexity = 10
+count = True
+statistics = True
+show-source = True

@@ -130,10 +130,10 @@ def test_full_tp_hit(engine):
 
 def test_partial_tp_hit(engine):
     pos = {"qty": 1, "status": "OPEN", "avg_entry_price": 100}
-    res = engine.evaluate("BTC/USDT", pos, 100, high_price=104) 
+    res = engine.evaluate("BTC/USDT", pos, 103, high_price=104) 
     assert res["reason"] == "partial_take_profit_hit"
     engine.settings.partial_take_profit_enabled = False
-    res = engine.evaluate("BTC/USDT", pos, 100, high_price=104)
+    res = engine.evaluate("BTC/USDT", pos, 103, high_price=104)
     assert not res["triggered"]
 
 def test_trailing_tp_hit(engine):
@@ -143,10 +143,10 @@ def test_trailing_tp_hit(engine):
     engine.settings.trailing_take_profit_giveback_pct = 0.01
     pos = {"qty": 1, "status": "OPEN", "avg_entry_price": 100}
     engine.evaluate("BTC/USDT", pos, 107) 
-    res = engine.evaluate("BTC/USDT", pos, 106.1)
+    res = engine.evaluate("BTC/USDT", pos, 105.5)
     assert res["reason"] == "trailing_take_profit_hit"
     engine.settings.trailing_take_profit_enabled = False
-    res = engine.evaluate("BTC/USDT", pos, 106.1)
+    res = engine.evaluate("BTC/USDT", pos, 105.5)
     assert not res["triggered"]
 
 def test_mark_partial_done(engine, repo):
