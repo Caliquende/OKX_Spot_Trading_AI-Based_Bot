@@ -39,7 +39,7 @@ jobs:
       env:
         PYTHONPATH: .
       run: |
-        pytest scratch/ --cov=core --cov=strategy --cov=indicators --cov=db --cov-report=xml
+        OKX_API_KEY=dummy_key OKX_SECRET=dummy_secret OKX_PASSPHRASE=dummy_passphrase pytest scratch/ --cov=core --cov=strategy --cov=indicators --cov=db --cov-report=xml
 
     - name: Upload coverage reports to Codecov
       uses: codecov/codecov-action@v4
