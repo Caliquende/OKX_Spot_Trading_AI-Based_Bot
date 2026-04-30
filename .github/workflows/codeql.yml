@@ -36,8 +36,11 @@ jobs:
           languages: ${{ matrix.language }}
           queries: security-extended
 
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+      - name: Build (Python)
+        run: |
+          # Python does not require a build step for CodeQL
+          echo "Skipping build for Python"
+
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
