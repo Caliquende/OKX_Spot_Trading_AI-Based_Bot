@@ -244,7 +244,17 @@ From the current source files:
 - `core/reconciler.py` is critical for position correctness. Its behavior should be watched closely before trusting live capital.
 - `scratch/` scripts are useful development checks, but they are not a formal CI suite.
 
+## Security
+
+This project follows robust security protocols:
+- **Dependabot:** Automated dependency and GitHub Actions updates.
+- **CodeQL:** Static Application Security Testing (SAST) to detect vulnerabilities.
+- **Security Policy:** Defined in [SECURITY.md](./SECURITY.md).
+- **Proactive Scanning:** Integrated Bandit and pip-audit in CI/CD pipelines.
+- **Pre-commit Hooks:** Local checks for secrets, private keys, and code quality.
+
 ## Safe Validation Flow
+
 
 Recommended validation order:
 

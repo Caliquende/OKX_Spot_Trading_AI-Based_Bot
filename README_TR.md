@@ -244,7 +244,17 @@ Kaynak dosyalara göre görünen sınırlar:
 - Gerçek pozisyon doğruluğu açısından kritik katman `core/reconciler.py`; bu nedenle canlı kullanımdan önce reconcile davranışı özellikle izlenmeli.
 - `scratch/` script'leri geliştirme kontrolleri için faydalıdır; ancak formal bir CI test paketi değildir.
 
+## Güvenlik
+
+Bu proje kapsamlı güvenlik protokollerini takip eder:
+- **Dependabot:** Otomatik bağımlılık ve GitHub Actions güncellemeleri.
+- **CodeQL:** Güvenlik açıklarını tespit etmek için Statik Uygulama Güvenlik Testi (SAST).
+- **Güvenlik Politikası:** [SECURITY.md](./SECURITY.md) dosyasında tanımlanmıştır.
+- **Proaktif Tarama:** CI/CD süreçlerine entegre Bandit ve pip-audit araçları.
+- **Pre-commit Kancaları:** Şifre sızıntısı ve kod kalitesi için yerel kontroller.
+
 ## Güvenli Doğrulama Akışı
+
 
 Önerilen doğrulama sırası:
 
