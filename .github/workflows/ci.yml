@@ -47,3 +47,21 @@ jobs:
         token: ${{ secrets.CODECOV_TOKEN }}
         file: ./coverage.xml
         fail_ci_if_error: false
+
+    # ── Security Scanning ──────────────────────────────────────
+    # TR: Bandit ile Python kodlarını güvenlik açıkları için tarar.
+    # EN: Scans Python code for security vulnerabilities with Bandit.
+    - name: Run Bandit security scan
+      run: |
+        pip install bandit[toml]
+        echo "🔒 Running Bandit static security analysis..."
+        bandit -r . -f screen --severity-level medium --confidence-level medium -x ./.venv,./venv,./env,./.pytest_cache,./scratch || true
+
+    # TR: pip-audit ile yüklü Python paketlerini CVE veritabanına karşı tarar.
+    # EN: Scans installed Python packages against the CVE database with pip-audit.
+    - name: Run pip-audit dependency scan
+      run: |
+        pip install pip-audit
+        echo "🔍 Running pip-audit dependency vulnerability scan..."
+        pip-audit || true
+
