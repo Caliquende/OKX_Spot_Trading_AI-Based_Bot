@@ -224,6 +224,7 @@ def apply_regime_execution_policy(
     adjusted = dict(signal)
     action = str(adjusted.get("action") or "HOLD").upper()
     regime = str(regime_params.get("regime") or regime_diag.get("regime") or "BASE").upper()
+    profile = str(regime_params.get("strategy_profile") or "balanced").lower()
     trend_bias = str(regime_diag.get("trend_bias") or "").upper()
     effective_ai_score = float(ai_diag.get("effective") or 0.0)
     weak_catalyst = bool(ai_diag.get("weak_catalyst"))
@@ -236,6 +237,7 @@ def apply_regime_execution_policy(
     ema_trend_signal = float(indicator_details.get("ema_trend") or 0.0)
     ema_slope_signal = float(indicator_details.get("ema_slope") or 0.0)
     price_vs_ema50_signal = float(indicator_details.get("price_vs_ema50") or 0.0)
+    volume_spike_signal = float(indicator_details.get("volume_spike") or 0.0)
 
     def hold(reason: str) -> tuple[dict[str, Any], str]:
         return {"action": "HOLD", "fraction": 0.0, "stance": "HOLD"}, reason
@@ -275,6 +277,18 @@ def apply_regime_execution_policy(
 
     # CHOP: fırsat kapısı açık ama yalnızca yüksek conviction.
     if regime == "CHOP":
+        if profile == "aggressive":
+            if score < buy_threshold:
+                return hold("policy_block_chop_aggressive_below_buy_threshold")
+            if effective_ai_score < 2.0:
+                return hold("policy_block_chop_aggressive_needs_ai_conviction")
+            if ema_slope_signal <= 0:
+                return hold("policy_block_chop_aggressive_needs_positive_slope")
+            if trend_bias == "DOWN" and effective_ai_score < 0:
+                return hold("policy_block_chop_down_bias_negative_ai")
+            adjusted["fraction"] = min(float(adjusted.get("fraction") or 0.0), float(params["buy_pct"]))
+            return adjusted, "policy_ok_chop_aggressive_probe"
+
         if score < strong_buy_threshold:
             return hold("policy_block_chop_needs_strong_score")
         if trend_bias == "DOWN" and effective_ai_score < 0:
@@ -289,6 +303,8 @@ def apply_regime_execution_policy(
             and ema_trend_signal > 0
             and (ema_slope_signal > 0 or price_vs_ema50_signal > 0)
         )
+        if profile == "aggressive":
+            trend_confirmation = trend_confirmation and volume_spike_signal > 0
         strong_reversal = action == "STRONG_BUY" and score >= strong_buy_threshold and effective_ai_score > 0
         if not trend_confirmation and not strong_reversal:
             return hold("policy_block_volatile_without_breakout_confirmation")

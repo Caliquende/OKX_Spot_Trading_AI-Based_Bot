@@ -265,12 +265,28 @@ def apply_ai_thresholds_conservatively(regime_params: dict, ai_thresholds: dict)
     base_buy_pct = float(params["buy_pct"])
     base_strong_buy_pct = float(params["strong_buy_pct"])
 
-    buy_threshold = max(base_buy, _clamp_float(ai_thresholds.get("buy_threshold"), base_buy, 1.0, 15.0))
-    strong_buy_threshold = max(
-        buy_threshold,
-        base_strong_buy,
-        _clamp_float(ai_thresholds.get("strong_buy_threshold"), base_strong_buy, 1.0, 18.0),
-    )
+    profile = str(getattr(settings, "strategy_profile", "balanced") or "balanced").lower()
+
+    if profile == "aggressive":
+        ai_buy = _clamp_float(ai_thresholds.get("buy_threshold"), base_buy, 1.0, 15.0)
+        ai_strong_buy = _clamp_float(ai_thresholds.get("strong_buy_threshold"), base_strong_buy, 1.0, 18.0)
+        buy_threshold = min(max(ai_buy, base_buy), base_buy + 0.75)
+        strong_buy_threshold = min(max(ai_strong_buy, buy_threshold, base_strong_buy), base_strong_buy + 1.0)
+        buy_pct = base_buy_pct
+        strong_buy_pct = base_strong_buy_pct
+    else:
+        buy_threshold = max(base_buy, _clamp_float(ai_thresholds.get("buy_threshold"), base_buy, 1.0, 15.0))
+        strong_buy_threshold = max(
+            buy_threshold,
+            base_strong_buy,
+            _clamp_float(ai_thresholds.get("strong_buy_threshold"), base_strong_buy, 1.0, 18.0),
+        )
+        buy_pct = min(base_buy_pct, _clamp_float(ai_thresholds.get("buy_pct"), base_buy_pct, 0.001, 0.20))
+        strong_buy_pct = min(
+            base_strong_buy_pct,
+            _clamp_float(ai_thresholds.get("strong_buy_pct"), base_strong_buy_pct, 0.001, 0.25),
+        )
+
     sell_threshold = max(base_sell, _clamp_float(ai_thresholds.get("sell_threshold"), base_sell, -18.0, -1.0))
     strong_sell_threshold = max(
         base_strong_sell,
@@ -284,12 +300,10 @@ def apply_ai_thresholds_conservatively(regime_params: dict, ai_thresholds: dict)
             "strong_buy_threshold": strong_buy_threshold,
             "sell_threshold": sell_threshold,
             "strong_sell_threshold": strong_sell_threshold,
-            "buy_pct": min(base_buy_pct, _clamp_float(ai_thresholds.get("buy_pct"), base_buy_pct, 0.001, 0.20)),
-            "strong_buy_pct": min(
-                base_strong_buy_pct,
-                _clamp_float(ai_thresholds.get("strong_buy_pct"), base_strong_buy_pct, 0.001, 0.25),
-            ),
+            "buy_pct": buy_pct,
+            "strong_buy_pct": strong_buy_pct,
             "ai_adjusted": True,
+            "strategy_profile": profile,
         }
     )
     params["strong_buy_pct"] = max(params["strong_buy_pct"], params["buy_pct"])
@@ -2182,6 +2196,7 @@ def main() -> None:
                         "buy_pct": float(settings.buy_pct),
                         "strong_buy_pct": float(settings.strong_buy_pct),
                         "regime": "BASE",
+                        "strategy_profile": settings.strategy_profile,
                     }
                     regime_diag = {"regime": "BASE"}
                     regime_flipped = False
@@ -2200,6 +2215,7 @@ def main() -> None:
                         bot_state_repo.set(_regime_state_key, regime, int(time.time() * 1000))
 
                         regime_params = resolve_regime_params(settings, regime)
+                        regime_params["strategy_profile"] = settings.strategy_profile
                         
                         if ai_thresholds and isinstance(ai_thresholds, dict):
                             regime_params = apply_ai_thresholds_conservatively(regime_params, ai_thresholds)

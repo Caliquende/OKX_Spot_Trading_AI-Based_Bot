@@ -96,6 +96,53 @@ def test_chop_allows_only_strong_score_and_reduces_size():
     assert reason == "policy_ok_chop_reduced_size"
 
 
+def test_aggressive_chop_allows_small_ai_confirmed_probe():
+    adjusted, reason = apply_regime_execution_policy(
+        signal={"action": "BUY", "fraction": 0.01, "stance": "BUY"},
+        score=6.7,
+        regime_params={
+            "regime": "CHOP",
+            "strategy_profile": "aggressive",
+            "buy_threshold": 6.5,
+            "strong_buy_threshold": 8,
+            "sell_threshold": -4,
+            "strong_sell_threshold": -8,
+            "buy_pct": 0.01,
+            "strong_buy_pct": 0.018,
+        },
+        regime_diag={"regime": "CHOP", "trend_bias": "UP"},
+        indicator_details={"ema_slope": 1},
+        ai_diag={"effective": 2.1, "weak_catalyst": False},
+    )
+
+    assert adjusted["action"] == "BUY"
+    assert adjusted["fraction"] == 0.01
+    assert reason == "policy_ok_chop_aggressive_probe"
+
+
+def test_aggressive_chop_blocks_without_ai_conviction():
+    adjusted, reason = apply_regime_execution_policy(
+        signal={"action": "BUY", "fraction": 0.01, "stance": "BUY"},
+        score=6.7,
+        regime_params={
+            "regime": "CHOP",
+            "strategy_profile": "aggressive",
+            "buy_threshold": 6.5,
+            "strong_buy_threshold": 8,
+            "sell_threshold": -4,
+            "strong_sell_threshold": -8,
+            "buy_pct": 0.01,
+            "strong_buy_pct": 0.018,
+        },
+        regime_diag={"regime": "CHOP", "trend_bias": "UP"},
+        indicator_details={"ema_slope": 1},
+        ai_diag={"effective": 1.9, "weak_catalyst": False},
+    )
+
+    assert adjusted["action"] == "HOLD"
+    assert reason == "policy_block_chop_aggressive_needs_ai_conviction"
+
+
 def test_volatile_blocks_without_confirmation():
     adjusted, reason = apply_regime_execution_policy(
         signal={"action": "BUY", "fraction": 0.015, "stance": "BUY"},

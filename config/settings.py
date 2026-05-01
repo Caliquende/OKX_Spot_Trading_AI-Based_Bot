@@ -151,6 +151,7 @@ class Settings:
     loop_seconds: int = _env_int("LOOP_SECONDS", "60")
     db_path: str = _env_first(["DB_PATH", "SQLITE_PATH"], "trading.db")
     dry_run: bool = _env_bool("DRY_RUN", "true")
+    strategy_profile: str = _env("STRATEGY_PROFILE", "balanced").strip().lower()
 
     # ---------------- ORDER LIMITS ----------------
     min_order_quote_usdt: float = _env_float("MIN_ORDER_QUOTE_USDT", "10")
@@ -301,6 +302,67 @@ class Settings:
 
     # ---------------- DEBUG ----------------
     log_level: str = _env("LOG_LEVEL", "INFO")
+
+    def __post_init__(self) -> None:
+        if self.strategy_profile not in {"balanced", "aggressive"}:
+            raise RuntimeError("STRATEGY_PROFILE must be one of: balanced, aggressive")
+
+        if self.strategy_profile == "aggressive":
+            self._apply_aggressive_profile()
+
+    def _apply_aggressive_profile(self) -> None:
+        """
+        Aggressive profile lowers long-entry friction and tightens loss control.
+
+        TR: Bu profil kar garantisi değildir. Amaç daha fazla fırsat yakalarken
+        exposure, stop ve drawdown sınırlarını aynı anda sıkı tutmaktır.
+        """
+        overrides = {
+            # Base signal gates.
+            "buy_threshold": 3.5,
+            "strong_buy_threshold": 6.0,
+            "sell_threshold": -4.0,
+            "strong_sell_threshold": -8.0,
+            "buy_pct": 0.02,
+            "strong_buy_pct": 0.04,
+            # Exposure and circuit breaker.
+            "max_symbol_exposure_pct": 0.20,
+            "max_total_exposure_pct": 0.60,
+            "max_single_trade_pct": 0.04,
+            "max_daily_drawdown_pct": 0.025,
+            # Scale-in only after a winning position proves itself.
+            "scale_in_trigger_streak": 2,
+            "strong_scale_in_trigger_streak": 2,
+            "scale_in_buy_pct": 0.01,
+            "strong_scale_in_buy_pct": 0.02,
+            "max_scale_in_count": 2,
+            # Faster loss control and profit capture.
+            "stop_loss_pct": 0.032,
+            "partial_take_profit_pct": 0.025,
+            "full_take_profit_pct": 0.06,
+            "break_even_activation_pct": 0.018,
+            "trailing_take_profit_activation_pct": 0.025,
+            "trailing_take_profit_giveback_pct": 0.012,
+            # Regime-specific signal gates and sizing.
+            "regime_buy_threshold_trend": 3.5,
+            "regime_strong_buy_threshold_trend": 6.0,
+            "regime_buy_pct_trend": 0.025,
+            "regime_strong_buy_pct_trend": 0.04,
+            "regime_buy_threshold_range": 4.0,
+            "regime_strong_buy_threshold_range": 7.0,
+            "regime_buy_pct_range": 0.018,
+            "regime_strong_buy_pct_range": 0.03,
+            "regime_buy_threshold_chop": 6.5,
+            "regime_strong_buy_threshold_chop": 8.0,
+            "regime_buy_pct_chop": 0.01,
+            "regime_strong_buy_pct_chop": 0.018,
+            "regime_buy_threshold_volatile": 5.0,
+            "regime_strong_buy_threshold_volatile": 8.0,
+            "regime_buy_pct_volatile": 0.02,
+            "regime_strong_buy_pct_volatile": 0.035,
+        }
+        for name, value in overrides.items():
+            object.__setattr__(self, name, value)
 
 
 settings = Settings()
