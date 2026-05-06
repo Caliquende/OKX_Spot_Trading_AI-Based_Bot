@@ -329,7 +329,7 @@ class Settings:
             "max_symbol_exposure_pct": 0.20,
             "max_total_exposure_pct": 0.60,
             "max_single_trade_pct": 0.04,
-            "max_daily_drawdown_pct": 0.025,
+            "max_daily_drawdown_pct": 0.05,
             # Scale-in only after a winning position proves itself.
             "scale_in_trigger_streak": 2,
             "strong_scale_in_trigger_streak": 2,
