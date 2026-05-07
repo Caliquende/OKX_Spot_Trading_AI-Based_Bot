@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from strategy.scoring_engine import apply_regime_execution_policy
+from strategy.scoring_engine import apply_regime_execution_policy, evaluate_signal
 
 
 def test_trend_up_keeps_buy_opportunity():
@@ -187,3 +187,84 @@ def test_losing_partial_close_promotes_to_full_close():
     assert adjusted["fraction"] == 1.0
     assert adjusted["stance"] == "STRONG_SELL"
     assert reason == "policy_full_close_loser_chop"
+
+
+def test_exit_signal_without_position_is_hold():
+    signal = evaluate_signal(
+        -5.0,
+        {
+            "buy_threshold": 3,
+            "strong_buy_threshold": 6,
+            "sell_threshold": -4,
+            "strong_sell_threshold": -9,
+            "buy_pct": 0.02,
+            "strong_buy_pct": 0.04,
+        },
+    )
+
+    adjusted, reason = apply_regime_execution_policy(
+        signal=signal,
+        score=-5.0,
+        regime_params={
+            "regime": "BASE",
+            "buy_threshold": 3,
+            "strong_buy_threshold": 6,
+            "sell_threshold": -4,
+            "strong_sell_threshold": -9,
+            "buy_pct": 0.02,
+            "strong_buy_pct": 0.04,
+        },
+        has_position=False,
+    )
+
+    assert signal["action"] == "PARTIAL_CLOSE"
+    assert adjusted["action"] == "HOLD"
+    assert adjusted["stance"] == "HOLD"
+    assert reason == "policy_block_exit_without_position"
+
+
+def test_any_losing_partial_close_promotes_to_full_close():
+    adjusted, reason = apply_regime_execution_policy(
+        signal={"action": "PARTIAL_CLOSE", "fraction": 0.5, "stance": "SELL"},
+        score=-4.5,
+        regime_params={
+            "regime": "RANGE",
+            "buy_threshold": 5,
+            "strong_buy_threshold": 8,
+            "sell_threshold": -4,
+            "strong_sell_threshold": -9,
+            "buy_pct": 0.02,
+            "strong_buy_pct": 0.04,
+        },
+        regime_diag={"regime": "RANGE", "trend_bias": "FLAT"},
+        has_position=True,
+        position_pnl_pct=-0.001,
+    )
+
+    assert adjusted["action"] == "FULL_CLOSE"
+    assert adjusted["stance"] == "STRONG_SELL"
+    assert reason == "policy_full_close_loser"
+
+
+def test_profitable_partial_close_remains_partial_close():
+    signal = {"action": "PARTIAL_CLOSE", "fraction": 0.5, "stance": "SELL"}
+
+    adjusted, reason = apply_regime_execution_policy(
+        signal=signal,
+        score=-4.5,
+        regime_params={
+            "regime": "RANGE",
+            "buy_threshold": 5,
+            "strong_buy_threshold": 8,
+            "sell_threshold": -4,
+            "strong_sell_threshold": -9,
+            "buy_pct": 0.02,
+            "strong_buy_pct": 0.04,
+        },
+        regime_diag={"regime": "RANGE", "trend_bias": "FLAT"},
+        has_position=True,
+        position_pnl_pct=0.01,
+    )
+
+    assert adjusted == signal
+    assert reason == "policy_ok"

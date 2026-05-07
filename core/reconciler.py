@@ -209,8 +209,15 @@ class Reconciler:
                 else: self._clear_mismatch(symbol)
             else:
                 sbox = bool(getattr(getattr(self.exchange, "ex", None), "sandbox", False))
-                if sbox and f_qty > epsilon: final_qty, final_avg, final_status = f_qty, f_avg, "OPEN"
-                else: final_qty, final_avg = 0.0, 0.0; self._clear_mismatch(symbol)
+                sandbox_ignore_zero = bool(getattr(s, "sandbox_ignore_balance_zero", True))
+                live_force_close_zero = bool(getattr(s, "live_force_close_on_zero_balance", True))
+                if sbox and sandbox_ignore_zero and f_qty > epsilon:
+                    final_qty, final_avg, final_status = f_qty, f_avg, "OPEN"
+                elif (not sbox) and (not live_force_close_zero) and f_qty > epsilon:
+                    final_qty, final_avg, final_status = f_qty, f_avg, "OPEN"
+                else:
+                    final_qty, final_avg = 0.0, 0.0
+                    self._clear_mismatch(symbol)
 
         if final_qty <= epsilon:
             final_qty, final_avg, final_status = 0.0, 0.0, "CLOSED"

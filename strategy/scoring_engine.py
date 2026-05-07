@@ -247,6 +247,9 @@ def apply_regime_execution_policy(
         promoted.update({"action": "FULL_CLOSE", "fraction": 1.0, "stance": "STRONG_SELL"})
         return promoted, reason
 
+    if not has_position and action in {"PARTIAL_CLOSE", "FULL_CLOSE"}:
+        return hold("policy_block_exit_without_position")
+
     # Zarar büyüdüğünde kademeli çıkış yerine tam risk azaltma.
     # Eski loglarda ana zarar indicator_partial_close zincirinden geldi.
     if has_position and action == "PARTIAL_CLOSE" and position_pnl_pct is not None:
@@ -255,6 +258,11 @@ def apply_regime_execution_policy(
             return promote_full_close(f"policy_full_close_loser_{regime.lower()}")
         if pnl <= -0.018 and trend_bias == "DOWN":
             return promote_full_close("policy_full_close_loser_down_bias")
+        if pnl <= 0:
+            return promote_full_close("policy_full_close_loser")
+
+    if has_position and action == "PARTIAL_CLOSE" and regime == "VOLATILE" and trend_bias == "DOWN":
+        return promote_full_close("policy_full_close_volatile_down_bias")
 
     if action not in {"BUY", "STRONG_BUY"}:
         return adjusted, "policy_ok"
