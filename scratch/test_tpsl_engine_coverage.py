@@ -53,8 +53,8 @@ def test_no_position(engine, repo):
     assert res["reason"] == "no_position"
 
 def test_invalid_position_branches(engine):
-    res = engine.evaluate("BTC/USDT", {"qty": 1, "status": "CLOSED"}, 100)
-    assert res["reason"] == "invalid_open_position"
+    res = engine.evaluate("BTC/USDT", {"qty": 1, "status": "CLOSED", "avg_entry_price": 100}, 101)
+    assert res["reason"] == "tpsl_not_triggered"
     res = engine.evaluate("BTC/USDT", {"qty": 0, "status": "OPEN"}, 100)
     assert res["reason"] == "invalid_open_position"
     res = engine.evaluate("BTC/USDT", {"qty": 1, "status": "OPEN"}, 0)

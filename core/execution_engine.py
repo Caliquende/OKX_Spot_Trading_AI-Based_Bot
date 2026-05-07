@@ -73,7 +73,6 @@ class ExecutionEngine:
         position = self.positions_repo.get(symbol)
         has_position = bool(
             position
-            and str(position["status"] or "").upper() == "OPEN"
             and float(position["qty"] or 0.0) > 1e-12
         )
 
@@ -215,7 +214,12 @@ class ExecutionEngine:
         if base_qty <= 0:
             return {"ok": False, "reason": "base_qty <= 0"}
 
-        base_qty = self.exchange.amount_to_precision(symbol, base_qty)
+        try:
+            base_qty = self.exchange.amount_to_precision(symbol, base_qty)
+        except Exception as exc:
+            err = str(exc)
+            logging.warning("[EXIT PRECISION BLOCKED] symbol=%s qty=%s err=%s", symbol, base_qty, err)
+            return {"ok": False, "reason": f"amount_precision:{err}"}
         if base_qty <= 0:
             return {"ok": False, "reason": "base_qty precision rounded to zero"}
 

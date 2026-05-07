@@ -144,11 +144,38 @@ class OKXExchange:
         free_map = balance.get("free") or {}
         used_map = balance.get("used") or {}
         total_map = balance.get("total") or {}
-        return {
+        parsed = {
             "free": free_map.get(asset, 0.0),
             "used": used_map.get(asset, 0.0),
             "total": total_map.get(asset, 0.0),
         }
+        if any(float(parsed.get(key) or 0.0) for key in ("free", "used", "total")):
+            return parsed
+
+        # OKX raw balance can carry the real asset rows under info.data[].details[]
+        # even when ccxt's normalized maps are empty for a currency.
+        info = balance.get("info") or {}
+        data = info.get("data") or []
+        if isinstance(data, list):
+            for account in data:
+                details = (account or {}).get("details") or []
+                if not isinstance(details, list):
+                    continue
+                for detail in details:
+                    if str((detail or {}).get("ccy") or "").upper() != asset.upper():
+                        continue
+                    total = (
+                        detail.get("eq")
+                        or detail.get("cashBal")
+                        or detail.get("bal")
+                        or detail.get("availBal")
+                        or 0.0
+                    )
+                    free = detail.get("availBal") or detail.get("availEq") or total
+                    used = detail.get("frozenBal") or detail.get("ordFrozen") or 0.0
+                    return {"free": free, "used": used, "total": total}
+
+        return parsed
 
     def get_asset_free(self, asset: str, balance: dict[str, Any] | None = None) -> float:
         info = self._asset_info_from_balance(asset, balance=balance)
@@ -157,6 +184,17 @@ class OKXExchange:
     def get_asset_total(self, asset: str, balance: dict[str, Any] | None = None) -> float:
         info = self._asset_info_from_balance(asset, balance=balance)
         return float(info.get("total") or 0.0)
+
+    def fetch_easy_convert_currency_list(self, source: str = "1") -> dict[str, Any]:
+        return self.ex.privateGetTradeEasyConvertCurrencyList({"source": str(source)})
+
+    def easy_convert(self, from_ccy: list[str], to_ccy: str = "USDT", source: str = "1") -> dict[str, Any]:
+        payload = {
+            "fromCcy": [str(ccy).upper() for ccy in from_ccy],
+            "toCcy": str(to_ccy).upper(),
+            "source": str(source),
+        }
+        return self.ex.privatePostTradeEasyConvert(payload)
 
     def _fetch_okx_account_config(self) -> dict[str, Any] | None:
         if self._okx_account_config_cache is not None:

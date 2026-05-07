@@ -366,20 +366,38 @@ class PositionsRepo:
 
             FROM positions
 
-            WHERE status = 'OPEN'
-
-            AND qty > 0
+            WHERE qty > 0
 
             """
 
         )
+
+    def normalize_statuses(self) -> None:
+        self.db.execute("UPDATE positions SET status = 'OPEN' WHERE qty > 0 AND status != 'OPEN'")
+        self.db.execute("UPDATE positions SET status = 'CLOSED' WHERE qty <= 0 AND status != 'CLOSED'")
+
+    def delete_unconfigured(self, configured_symbols: list[str]) -> int:
+        normalized = sorted({str(symbol).strip().upper() for symbol in configured_symbols if str(symbol).strip()})
+        if not normalized:
+            return 0
+
+        placeholders = ", ".join("?" for _ in normalized)
+        before = self.db.fetchone(
+            f"SELECT COUNT(*) AS c FROM positions WHERE UPPER(symbol) NOT IN ({placeholders})",
+            tuple(normalized),
+        )
+        self.db.execute(
+            f"DELETE FROM positions WHERE UPPER(symbol) NOT IN ({placeholders})",
+            tuple(normalized),
+        )
+        return int((before or {}).get("c") or 0)
 
 
     def count_open(self) -> int:
 
         row = self.db.fetchone(
 
-            "SELECT COUNT(*) AS c FROM positions WHERE status = 'OPEN' AND qty > 0"
+            "SELECT COUNT(*) AS c FROM positions WHERE qty > 0"
 
         )
 

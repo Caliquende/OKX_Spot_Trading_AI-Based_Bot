@@ -73,6 +73,15 @@ def test_positions_repo_final(db):
     assert pos["qty"] == 1.0
     repo.upsert("BTC/USDT", "BTC", "USDT", 0.0, 0, 5, 0.2, "CLOSED", 2000)
     assert repo.count_open() == 0
+    repo.upsert("XRP/USDT", "XRP", "USDT", 2.0, 1.4, 0, 0, "OPEN", 3000)
+    repo.upsert("NEAR/USDT", "NEAR", "USDT", 2.0, 1.4, 0, 0, "CLOSED", 3000)
+    repo.normalize_statuses()
+    assert repo.count_open() == 2
+    assert len(repo.get_all_open()) == 2
+    assert repo.delete_unconfigured(["BTC/USDT"]) == 2
+    assert repo.get("XRP/USDT") is None
+    assert repo.get("NEAR/USDT") is None
+    assert repo.get("BTC/USDT") is not None
 
 def test_locks_repo_final(db):
     repo = LocksRepo(db)

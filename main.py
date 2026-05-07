@@ -69,7 +69,7 @@ except Exception:
             "bulk_refresh": None,
             "threshold_update": None,
         }
-from config.settings import settings
+from config.settings import get_strategy_profile_values, settings, strategy_profile_names
 from core.exchange import OKXExchange
 from core.execution_engine import ExecutionEngine
 from core.health_checker import HealthChecker
@@ -265,7 +265,7 @@ def apply_ai_thresholds_conservatively(regime_params: dict, ai_thresholds: dict)
     base_buy_pct = float(params["buy_pct"])
     base_strong_buy_pct = float(params["strong_buy_pct"])
 
-    profile = str(getattr(settings, "strategy_profile", "balanced") or "balanced").lower()
+    profile = str(regime_params.get("strategy_profile") or getattr(settings, "strategy_profile", "balanced") or "balanced").lower()
 
     if profile == "aggressive":
         ai_buy = _clamp_float(ai_thresholds.get("buy_threshold"), base_buy, 1.0, 15.0)
@@ -308,6 +308,85 @@ def apply_ai_thresholds_conservatively(regime_params: dict, ai_thresholds: dict)
     )
     params["strong_buy_pct"] = max(params["strong_buy_pct"], params["buy_pct"])
     return params
+
+
+def resolve_profile_regime_params(base_settings, profile: str, regime: str) -> dict:
+    values = get_strategy_profile_values(profile)
+    regime_key = str(regime or "BASE").upper()
+    suffix = regime_key.lower()
+
+    def value(name: str, fallback_name: str) -> float:
+        return float(values.get(name, values.get(fallback_name, getattr(base_settings, fallback_name))))
+
+    if regime_key in {"TREND", "RANGE", "CHOP", "VOLATILE"}:
+        params = {
+            "buy_threshold": value(f"regime_buy_threshold_{suffix}", "buy_threshold"),
+            "strong_buy_threshold": value(f"regime_strong_buy_threshold_{suffix}", "strong_buy_threshold"),
+            "sell_threshold": value(f"regime_sell_threshold_{suffix}", "sell_threshold"),
+            "strong_sell_threshold": value(f"regime_strong_sell_threshold_{suffix}", "strong_sell_threshold"),
+            "buy_pct": value(f"regime_buy_pct_{suffix}", "buy_pct"),
+            "strong_buy_pct": value(f"regime_strong_buy_pct_{suffix}", "strong_buy_pct"),
+            "regime": regime_key,
+        }
+    else:
+        params = {
+            "buy_threshold": float(values.get("buy_threshold", base_settings.buy_threshold)),
+            "strong_buy_threshold": float(values.get("strong_buy_threshold", base_settings.strong_buy_threshold)),
+            "sell_threshold": float(values.get("sell_threshold", base_settings.sell_threshold)),
+            "strong_sell_threshold": float(values.get("strong_sell_threshold", base_settings.strong_sell_threshold)),
+            "buy_pct": float(values.get("buy_pct", base_settings.buy_pct)),
+            "strong_buy_pct": float(values.get("strong_buy_pct", base_settings.strong_buy_pct)),
+            "regime": "BASE",
+        }
+
+    params["strategy_profile"] = profile
+    return params
+
+
+def select_dynamic_strategy_profile(
+    *,
+    base_profile: str,
+    mode: str,
+    regime: str,
+    regime_diag: dict,
+    ai_diag: dict,
+    total_score: float,
+    has_position: bool,
+) -> tuple[str, str]:
+    base = str(base_profile or "balanced").lower()
+    if str(mode or "manual").lower() != "dynamic":
+        return base, "manual_profile"
+
+    allowed = strategy_profile_names()
+    if base not in allowed:
+        base = "balanced"
+
+    regime_name = str(regime or regime_diag.get("regime") or "BASE").upper()
+    trend_bias = str(regime_diag.get("trend_bias") or "").upper()
+    ai_effective = float(ai_diag.get("effective") or 0.0)
+    weak_catalyst = bool(ai_diag.get("weak_catalyst"))
+    score = float(total_score or 0.0)
+
+    if has_position and (ai_effective <= -3.0 or trend_bias == "DOWN"):
+        return "conservative", "protect_open_position"
+    if regime_name == "VOLATILE":
+        if trend_bias == "UP" and ai_effective >= 2.0 and score >= 5.0:
+            return "scalper", "volatile_up_ai_confirmed"
+        return "conservative", "volatile_risk_control"
+    if regime_name == "TREND" and trend_bias == "UP":
+        if ai_effective >= 2.0 and score >= 4.0 and not weak_catalyst:
+            return "aggressive", "trend_up_ai_confirmed"
+        return "balanced", "trend_up_unconfirmed"
+    if regime_name == "RANGE":
+        if ai_effective >= 1.5 and score >= 4.0:
+            return "balanced", "range_mean_reversion"
+        return "conservative", "range_low_conviction"
+    if regime_name == "CHOP":
+        if ai_effective >= 3.0 and score >= 6.0:
+            return "balanced", "chop_high_conviction"
+        return "conservative", "chop_noise_control"
+
+    return base, "base_profile"
 
 
 def ohlcv_to_df(rows: list[list[float]]) -> pd.DataFrame:
@@ -514,6 +593,10 @@ def _format_cycle_symbol_line(raw_line: str) -> list[str]:
         ),
         f"  Regime: {fields.get('regime', 'N/A')}",
     ]
+
+    thresholds = fields.get("thresholds")
+    if thresholds:
+        lines.append(f"  Thresholds: {_telegram_shorten(thresholds, 130)}")
 
     position = fields.get("position")
     if position:
@@ -917,11 +1000,11 @@ def find_dust_balances(
     min_order_quote_usdt: float,
 ) -> list[dict[str, Any]]:
     """
-    Exchange free balance uzerinden dust adaylarini bulur.
+    Exchange free balance uzerinden kucuk bakiye adaylarini bulur.
 
-    /positions DB pozisyon state'ini gosterir; dust ise pozisyon sayilmayacak
-    kadar kucuk serbest bakiyedir. Bu yuzden kaynak olarak exchange balance
-    kullanilir.
+    /positions DB pozisyon state'ini gosterir. Bu helper min order degeri
+    altindaki temizlenebilir serbest bakiyeleri exchange balance uzerinden
+    listeler.
     """
     balance = exchange.fetch_balance()
     candidates: list[dict[str, Any]] = []
@@ -980,6 +1063,49 @@ def find_dust_balances(
     return sorted(candidates, key=lambda item: float(item.get("value_usdt") or 0.0), reverse=True)
 
 
+def build_dust_candidate_from_asset(
+    *,
+    exchange: OKXExchange,
+    asset: str,
+    free_qty: float,
+    max_value_usdt: float,
+    min_order_quote_usdt: float,
+) -> dict[str, Any] | None:
+    asset = str(asset or "").upper()
+    if not asset or asset == "USDT" or free_qty <= 1e-12:
+        return None
+    symbol = f"{asset}/USDT"
+    try:
+        ticker = exchange.fetch_ticker(symbol)
+        reference_price, price_source = extract_reference_price(ticker)
+    except Exception as exc:
+        return {
+            "symbol": symbol,
+            "asset": asset,
+            "free_qty": free_qty,
+            "price": 0.0,
+            "value_usdt": 0.0,
+            "price_source": "unavailable",
+            "cleanable": False,
+            "reason": f"price_unavailable:{str(exc)[:80]}",
+        }
+
+    value_usdt = free_qty * reference_price
+    if value_usdt <= 0 or value_usdt > max_value_usdt:
+        return None
+
+    return {
+        "symbol": symbol,
+        "asset": asset,
+        "free_qty": free_qty,
+        "price": reference_price,
+        "value_usdt": value_usdt,
+        "price_source": price_source,
+        "cleanable": value_usdt >= min_order_quote_usdt,
+        "reason": "ok" if value_usdt >= min_order_quote_usdt else "below_min_order_quote",
+    }
+
+
 def format_dust_balances(candidates: list[dict[str, Any]], max_value_usdt: float) -> str:
     if not candidates:
         return f"[DUST]\nnone <= {max_value_usdt:.2f} USDT"
@@ -996,6 +1122,217 @@ def format_dust_balances(candidates: list[dict[str, Any]], max_value_usdt: float
             )
         )
     return "\n\n".join(lines)
+
+
+def _parse_easy_convert_eligible_assets(response: dict[str, Any], target_ccy: str) -> dict[str, float]:
+    eligible: dict[str, float] = {}
+    target = str(target_ccy or "USDT").upper()
+    for group in (response or {}).get("data") or []:
+        to_ccys = {str(ccy).upper() for ccy in (group or {}).get("toCcy") or []}
+        if target not in to_ccys:
+            continue
+        for item in (group or {}).get("fromData") or []:
+            asset = str((item or {}).get("fromCcy") or "").upper()
+            if not asset or asset == target:
+                continue
+            try:
+                amount = float((item or {}).get("fromAmt") or 0.0)
+            except Exception:
+                amount = 0.0
+            if amount > 0:
+                eligible[asset] = amount
+    return eligible
+
+
+def _format_dust_maintenance_message(
+    *,
+    mode: str,
+    max_value_usdt: float,
+    candidates: list[dict[str, Any]],
+    selected: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+    result: dict[str, Any] | None = None,
+) -> str:
+    lines = [
+        "[DUST MAINT]",
+        f"mode={mode}",
+        f"candidate_max={max_value_usdt:.4f} USDT",
+    ]
+    if selected:
+        lines.append("")
+        lines.append("Selected:")
+        for item in selected:
+            lines.append(
+                f"{item['asset']} value={float(item['value_usdt']):.4f} qty={float(item['free_qty']):.8f}"
+            )
+    elif candidates:
+        lines.append("")
+        lines.append("Selected: none")
+    else:
+        lines.append("")
+        lines.append("Candidates: none")
+
+    if skipped:
+        lines.append("")
+        lines.append("Skipped:")
+        for item in skipped[:12]:
+            lines.append(
+                f"{item.get('asset') or item.get('symbol')} value={float(item.get('value_usdt') or 0.0):.4f} reason={item.get('reason')}"
+            )
+
+    if result is not None:
+        lines.append("")
+        lines.append("Result:")
+        lines.append(f"code={result.get('code')} msg={result.get('msg')}")
+        for row in result.get("data") or []:
+            lines.append(
+                f"{row.get('fromCcy')}->{row.get('toCcy')} status={row.get('status')} from={row.get('fillFromSz')} to={row.get('fillToSz')}"
+            )
+    return "\n".join(lines)
+
+
+def run_dust_maintenance(
+    *,
+    exchange: OKXExchange,
+    settings,
+    positions_repo: PositionsRepo,
+    orders_repo: OrdersRepo,
+    locks_repo: LocksRepo,
+    bot_state_repo: BotStateRepo,
+    reconciler: Reconciler,
+    notifier: TelegramNotifier | None,
+    current_cycle_actions: dict[str, str] | None = None,
+    force_notify: bool = False,
+) -> dict[str, Any]:
+    mode = str(getattr(settings, "dust_maintenance_mode", "auto_convert") or "auto_convert").lower()
+    if mode == "off":
+        return {"ok": True, "mode": mode, "selected": []}
+    if mode not in {"notify_only", "telegram_confirm", "auto_convert"}:
+        logging.warning("[DUST MAINT] invalid mode=%s; falling back to notify_only", mode)
+        mode = "notify_only"
+
+    now_ms = int(time.time() * 1000)
+    interval_ms = max(0, int(getattr(settings, "dust_auto_convert_interval_minutes", 360) or 0)) * 60 * 1000
+    state_key = "dust_maintenance_state"
+    state = bot_state_repo.get(state_key) or {}
+    last_run_ms = int((state or {}).get("last_run_ms") or 0)
+    if not force_notify and interval_ms > 0 and last_run_ms > 0 and now_ms - last_run_ms < interval_ms:
+        return {"ok": True, "mode": mode, "skipped": "interval_not_elapsed"}
+
+    max_value_usdt = float(getattr(settings, "dust_candidate_max_value_usdt", 0.05) or 0.05)
+    target_ccy = str(getattr(settings, "dust_auto_convert_to_ccy", "USDT") or "USDT").upper()
+    source = str(getattr(settings, "dust_easy_convert_source", "1") or "1")
+
+    easy_list = exchange.fetch_easy_convert_currency_list(source=source)
+    eligible_assets = _parse_easy_convert_eligible_assets(easy_list, target_ccy)
+    candidates = find_dust_balances(
+        exchange=exchange,
+        symbols=settings.symbols,
+        max_value_usdt=max_value_usdt,
+        min_order_quote_usdt=float(settings.min_order_quote_usdt),
+    )
+    seen_assets = {str(item.get("asset") or "").upper() for item in candidates}
+    for asset, amount in eligible_assets.items():
+        if asset in seen_assets:
+            continue
+        extra = build_dust_candidate_from_asset(
+            exchange=exchange,
+            asset=asset,
+            free_qty=float(amount),
+            max_value_usdt=max_value_usdt,
+            min_order_quote_usdt=float(settings.min_order_quote_usdt),
+        )
+        if extra is not None:
+            candidates.append(extra)
+            seen_assets.add(asset)
+    candidates = sorted(candidates, key=lambda item: float(item.get("value_usdt") or 0.0), reverse=True)
+
+    current_cycle_actions = current_cycle_actions or {}
+    open_positions = {
+        str(row["symbol"]).upper(): row
+        for row in positions_repo.get_all_open()
+    }
+    selected: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    max_assets = min(5, max(1, int(getattr(settings, "dust_auto_convert_max_assets_per_run", 5) or 5)))
+    max_total = max(0.0, float(getattr(settings, "dust_auto_convert_max_total_usdt", 0.25) or 0.25))
+    running_total = 0.0
+
+    for item in candidates:
+        symbol = str(item["symbol"])
+        asset = str(item["asset"]).upper()
+        value = float(item.get("value_usdt") or 0.0)
+        reason = ""
+        if value <= 0 or value > max_value_usdt:
+            reason = "outside_value_threshold"
+        elif asset not in eligible_assets:
+            reason = "not_okx_easy_convert_eligible"
+        elif symbol.upper() in open_positions:
+            position_value = compute_position_value(open_positions[symbol.upper()], float(item.get("price") or 0.0))
+            if position_value > max_value_usdt:
+                reason = "active_position"
+        elif orders_repo.has_pending_or_open(symbol):
+            reason = "pending_order"
+        elif locks_repo.is_locked(symbol, now_ms):
+            reason = "symbol_locked"
+        elif str(current_cycle_actions.get(symbol) or "").upper() in {"BUY", "STRONG_BUY", "FULL_CLOSE", "PARTIAL_CLOSE"}:
+            reason = "current_cycle_action"
+        elif len(selected) >= max_assets:
+            reason = "max_assets_per_run"
+        elif max_total > 0 and running_total + value > max_total:
+            reason = "max_total_usdt"
+
+        if reason:
+            skipped.append({**item, "reason": reason})
+            continue
+        selected.append(item)
+        running_total += value
+
+    result = None
+    if mode == "auto_convert" and bool(getattr(settings, "dry_run", False)) and selected:
+        skipped.extend({**item, "reason": "dry_run"} for item in selected)
+        selected = []
+
+    if mode == "auto_convert" and selected:
+        from_ccys = [str(item["asset"]).upper() for item in selected]
+        logging.info("[DUST CONVERT AUTO] assets=%s target=%s total_est=%.4f", from_ccys, target_ccy, running_total)
+        result = exchange.easy_convert(from_ccys, to_ccy=target_ccy, source=source)
+        if str((result or {}).get("code")) == "0":
+            for item in selected:
+                try:
+                    reconciler.sync_symbol(str(item["symbol"]))
+                except Exception as exc:
+                    logging.warning("[DUST RECON FAIL] %s err=%s", item["symbol"], exc)
+            positions_repo.normalize_statuses()
+        else:
+            logging.warning("[DUST CONVERT FAILED] result=%s", result)
+
+    bot_state_repo.set(
+        state_key,
+        {
+            "last_run_ms": now_ms,
+            "mode": mode,
+            "selected": [item["asset"] for item in selected],
+            "skipped_count": len(skipped),
+            "result_code": (result or {}).get("code") if result is not None else None,
+        },
+        now_ms,
+    )
+
+    if force_notify or selected or skipped:
+        notify_safe(
+            notifier,
+            _format_dust_maintenance_message(
+                mode=mode,
+                max_value_usdt=max_value_usdt,
+                candidates=candidates,
+                selected=selected,
+                skipped=skipped,
+                result=result,
+            ),
+        )
+
+    return {"ok": True, "mode": mode, "selected": selected, "skipped": skipped, "result": result}
 
 
 def local_trading_day_context(now_ms: int | None = None) -> tuple[str, int]:
@@ -1197,6 +1534,8 @@ def handle_force_command(
     reconciler: Reconciler,
     execution: ExecutionEngine,
     positions_repo: PositionsRepo,
+    orders_repo: OrdersRepo,
+    locks_repo: LocksRepo,
     portfolio_engine: PortfolioEngine,
     exchange: OKXExchange,
     bot_state_repo: BotStateRepo,
@@ -1328,74 +1667,19 @@ def handle_force_command(
             notify_safe(notifier, format_dust_balances(candidates, max_value_usdt))
             return
 
-        # -------------------------
-        # DUST CLEAN
-        # -------------------------
-
-        if cmd == "/dust_clean":
-            max_value_usdt = parse_optional_positive_float(parts, 1, 5.0, "max_value_usdt")
-            candidates = find_dust_balances(
+        if cmd in {"/dust_maint", "/dust_convert"}:
+            run_dust_maintenance(
                 exchange=exchange,
-                symbols=settings.symbols,
-                max_value_usdt=max_value_usdt,
-                min_order_quote_usdt=float(settings.min_order_quote_usdt),
+                settings=settings,
+                positions_repo=positions_repo,
+                orders_repo=orders_repo,
+                locks_repo=locks_repo,
+                bot_state_repo=bot_state_repo,
+                reconciler=reconciler,
+                notifier=notifier,
+                force_notify=True,
             )
-            cleanable = [item for item in candidates if item.get("cleanable")]
-
-            if not cleanable:
-                notify_safe(notifier, format_dust_balances(candidates, max_value_usdt) + "\n\n[DUST CLEAN] no cleanable balances")
-                return
-
-            result_lines = [f"[DUST CLEAN] max_value={max_value_usdt:.2f} USDT"]
-            for item in cleanable:
-                symbol = str(item["symbol"])
-                qty = float(item["free_qty"])
-                result = execution.force_sell(
-                    symbol,
-                    qty,
-                    reason=f"dust_clean value={float(item['value_usdt']):.4f} max={max_value_usdt:.2f}",
-                )
-                logging.info(
-                    "[DUST CLEAN RESULT] symbol=%s qty=%.8f value_usdt=%.4f result=%s",
-                    symbol,
-                    qty,
-                    float(item["value_usdt"]),
-                    result,
-                )
-
-                if result and result.get("ok"):
-                    bot_state_repo.set(
-                        f"pending_exit_reason:{symbol}",
-                        {"reason": "dust_clean", "client_order_id": result.get("client_order_id")},
-                        int(time.time() * 1000),
-                    )
-                    reset_signal_streak(
-                        bot_state_repo,
-                        signal_state,
-                        symbol,
-                        "dust_clean",
-                    )
-                    result_lines.append(
-                        f"{symbol} sell_sent qty={qty:.8f} value={float(item['value_usdt']):.4f} USDT"
-                    )
-                else:
-                    reason = (result or {}).get("reason", "unknown")
-                    result_lines.append(
-                        f"{symbol} failed qty={qty:.8f} value={float(item['value_usdt']):.4f} USDT reason={reason}"
-                    )
-
-            skipped = [item for item in candidates if not item.get("cleanable")]
-            if skipped:
-                result_lines.append("")
-                result_lines.append("Skipped:")
-                for item in skipped:
-                    result_lines.append(
-                        f"{item['symbol']} value={float(item['value_usdt']):.4f} reason={item.get('reason')}"
-                    )
-
-            notify_safe(notifier, "\n".join(result_lines))
             return
-
 
         # -------------------------
         # STREAKS
@@ -1873,6 +2157,8 @@ def poll_telegram_commands(
     reconciler: Reconciler,
     execution: ExecutionEngine,
     positions_repo: PositionsRepo,
+    orders_repo: OrdersRepo,
+    locks_repo: LocksRepo,
     portfolio_engine: PortfolioEngine,
     exchange: OKXExchange,
     bot_state_repo: BotStateRepo,
@@ -1915,6 +2201,8 @@ def poll_telegram_commands(
                 reconciler=reconciler,
                 execution=execution,
                 positions_repo=positions_repo,
+                orders_repo=orders_repo,
+                locks_repo=locks_repo,
                 portfolio_engine=portfolio_engine,
                 exchange=exchange,
                 bot_state_repo=bot_state_repo,
@@ -1962,6 +2250,10 @@ def main() -> None:
     risk_engine = RiskEngine(settings)
 
     signal_state = load_signal_state(bot_state_repo, settings.symbols)
+    positions_repo.normalize_statuses()
+    removed_positions = positions_repo.delete_unconfigured(settings.symbols)
+    if removed_positions:
+        logging.info("[DB CLEANUP] removed %s unconfigured position row(s)", removed_positions)
 
     notify_safe(
         notifier,
@@ -1978,10 +2270,31 @@ def main() -> None:
     while True:
         cycle_started_ms = int(time.time() * 1000)
         symbol_lines: list[str] = []
+        pending_trade_decisions: list[dict[str, Any]] = []
         status = "OK"
 
         try:
+            positions_repo.normalize_statuses()
+            removed_positions = positions_repo.delete_unconfigured(settings.symbols)
+            if removed_positions:
+                logging.info("[DB CLEANUP] removed %s unconfigured position row(s)", removed_positions)
+
             locks_repo.clear_expired(int(time.time() * 1000))
+            try:
+                run_dust_maintenance(
+                    exchange=exchange,
+                    settings=settings,
+                    positions_repo=positions_repo,
+                    orders_repo=orders_repo,
+                    locks_repo=locks_repo,
+                    bot_state_repo=bot_state_repo,
+                    reconciler=reconciler,
+                    notifier=notifier,
+                )
+            except Exception as dust_exc:
+                logging.exception("[DUST MAINT ERROR] %s", dust_exc)
+                notify_safe(notifier, f"[DUST MAINT ERROR]\n{str(dust_exc)[:250]}")
+
             health = health_checker.run()
             portfolio = portfolio_engine.get_snapshot()
 
@@ -2152,7 +2465,6 @@ def main() -> None:
                     position = positions_repo.get(symbol)
                     has_position = bool(
                         position
-                        and str(position["status"]).upper() == "OPEN"
                         and float(position["qty"]) > 0
                     )
 
@@ -2188,16 +2500,9 @@ def main() -> None:
                     )
 
                     regime = "BASE"
-                    regime_params = {
-                        "buy_threshold": float(settings.buy_threshold),
-                        "strong_buy_threshold": float(settings.strong_buy_threshold),
-                        "sell_threshold": float(settings.sell_threshold),
-                        "strong_sell_threshold": float(settings.strong_sell_threshold),
-                        "buy_pct": float(settings.buy_pct),
-                        "strong_buy_pct": float(settings.strong_buy_pct),
-                        "regime": "BASE",
-                        "strategy_profile": settings.strategy_profile,
-                    }
+                    effective_profile = settings.strategy_profile
+                    profile_reason = "static_fallback"
+                    regime_params = resolve_profile_regime_params(settings, effective_profile, "BASE")
                     regime_diag = {"regime": "BASE"}
                     regime_flipped = False
 
@@ -2214,8 +2519,16 @@ def main() -> None:
                             logging.info(f"[REGIME FLIP] {symbol} {_prev_regime} -> {regime}")
                         bot_state_repo.set(_regime_state_key, regime, int(time.time() * 1000))
 
-                        regime_params = resolve_regime_params(settings, regime)
-                        regime_params["strategy_profile"] = settings.strategy_profile
+                        effective_profile, profile_reason = select_dynamic_strategy_profile(
+                            base_profile=settings.strategy_profile,
+                            mode=settings.strategy_profile_mode,
+                            regime=regime,
+                            regime_diag=regime_diag,
+                            ai_diag=ai_score_diag,
+                            total_score=total_score,
+                            has_position=has_position,
+                        )
+                        regime_params = resolve_profile_regime_params(settings, effective_profile, regime)
                         
                         if ai_thresholds and isinstance(ai_thresholds, dict):
                             regime_params = apply_ai_thresholds_conservatively(regime_params, ai_thresholds)
@@ -2224,6 +2537,18 @@ def main() -> None:
                         if market_data.get(symbol):
                             market_data[symbol]["indicators"] = indicator_details
 
+                        logging.info(
+                            "[PROFILE SELECT] %s mode=%s base=%s effective=%s reason=%s regime=%s trend_bias=%s ai_effective=%.2f total=%.2f",
+                            symbol,
+                            settings.strategy_profile_mode,
+                            settings.strategy_profile,
+                            effective_profile,
+                            profile_reason,
+                            regime,
+                            regime_diag.get("trend_bias"),
+                            float(ai_score_diag.get("effective") or 0.0),
+                            float(total_score),
+                        )
                         logging.info(f"[REGIME RAW] {symbol} prev={_prev_regime} diag={regime_diag} params={regime_params}")
 
                     logging.info(
@@ -2266,6 +2591,12 @@ def main() -> None:
                     action = str(signal["action"]).upper()
                     fraction = float(signal["fraction"])
                     stance = str(signal["stance"]).upper()
+                    profile_values = get_strategy_profile_values(effective_profile)
+                    profile_risk_limits = {
+                        "max_symbol_exposure_pct": float(profile_values.get("max_symbol_exposure_pct", settings.max_symbol_exposure_pct)),
+                        "max_total_exposure_pct": float(profile_values.get("max_total_exposure_pct", settings.max_total_exposure_pct)),
+                        "max_single_trade_pct": float(profile_values.get("max_single_trade_pct", settings.max_single_trade_pct)),
+                    }
 
                     # P0.1.1:
                     # panic_mode veya auto risk guard aktifken streak'in artmasına artık izin vermiyoruz.
@@ -2330,6 +2661,39 @@ def main() -> None:
                         logging.info(
                             f"[TPSL CHECK] {symbol} sl={tpsl_decision['stop_loss_price']} be={tpsl_decision.get('break_even_stop_price')} ptp={tpsl_decision['partial_take_profit_price']} ftp={tpsl_decision['full_take_profit_price']} peak={tpsl_decision.get('peak_price')} peak_pnl_pct={tpsl_decision.get('peak_pnl_pct')} retrace_pct={tpsl_decision.get('trailing_retrace_pct')} pnl_pct={tpsl_decision['pnl_pct']} reason={tpsl_decision['reason']}"
                         )
+
+                    pending_trade_decisions.append(
+                        {
+                            "symbol": symbol,
+                            "reconcile_ok": reconcile_ok,
+                            "position": position,
+                            "has_position": has_position,
+                            "last_price": last_price,
+                            "action": action,
+                            "fraction": fraction,
+                            "stance": stance,
+                            "streak": streak,
+                            "regime": regime,
+                            "regime_flipped": regime_flipped,
+                            "regime_params": regime_params,
+                            "profile_risk_limits": profile_risk_limits,
+                            "effective_profile": effective_profile,
+                            "profile_reason": profile_reason,
+                            "total_score": total_score,
+                            "tpsl_decision": tpsl_decision,
+                            "tpsl_note": tpsl_note,
+                            "rumor": rumor,
+                        }
+                    )
+                    logging.info(
+                        "[SIGNAL PLANNED] %s action=%s stance=%s score=%.2f streak=%s",
+                        symbol,
+                        action,
+                        stance,
+                        float(total_score),
+                        streak,
+                    )
+                    continue
 
                     if action in {"BUY", "STRONG_BUY"}:
                         # P0.1: panic_mode veya trading_paused aktifse yeni entry açmayacağız.
@@ -2401,6 +2765,7 @@ def main() -> None:
                                         position=position,
                                         desired_quote=quote_amount,
                                         last_price=last_price,
+                                        risk_limits=profile_risk_limits,
                                     )
 
                                     if not allowed:
@@ -2508,7 +2873,7 @@ def main() -> None:
                                             total_balance = max(float(portfolio["total_balance"]), 1e-12)
                                             scale_fraction = settings.strong_scale_in_buy_pct if action == "STRONG_BUY" else settings.scale_in_buy_pct
                                             desired_quote = total_balance * scale_fraction
-                                            exposure_cap_quote = max(0.0, total_balance * settings.max_symbol_exposure_pct - position_value)
+                                            exposure_cap_quote = max(0.0, total_balance * profile_risk_limits["max_symbol_exposure_pct"] - position_value)
                                             cash_cap_quote = max(0.0, float(cycle_free_usdt) - settings.min_free_usdt)
                                             quote_amount = min(desired_quote, exposure_cap_quote, cash_cap_quote)
 
@@ -2545,6 +2910,7 @@ def main() -> None:
                                                     position=position,
                                                     desired_quote=quote_amount,
                                                     last_price=last_price,
+                                                    risk_limits=profile_risk_limits,
                                                 )
 
                                                 if not allowed:
@@ -2699,9 +3065,10 @@ def main() -> None:
                                 "exit_sent",
                             )
                         elif (
-                            execution_note.startswith("blocked:scale_in:no_scale_in_on_loser")
+                            execution_note.startswith("blocked:scale_in:scale_in_only_on_pullback")
                             or execution_note.startswith("blocked:max_scale_in_count")
                             or execution_note.startswith("blocked:scale_in:invalid_avg")
+                            or execution_note.startswith("blocked:scale_in:invalid_last_price")
                         ):
                             streak = decay_signal_streak(
                                 bot_state_repo,
@@ -2745,7 +3112,7 @@ def main() -> None:
                     if regime_params.get("ai_adjusted"):
                         ai_text = " [AI_THRESHOLDS]"
                     log_line = (
-                        f"{symbol}{ai_text} | regime={regime} | total={total_score:.2f} | action={action} | stance={stance} | streak={streak} "
+                        f"{symbol}{ai_text} | profile={effective_profile}:{profile_reason} | regime={regime} | total={total_score:.2f} | action={action} | stance={stance} | streak={streak} "
                         f"| position={pos_text} | tpsl={tpsl_note} | exec={order_text}{groq_text}"
                     )
                     symbol_lines.append(log_line)
@@ -2757,6 +3124,422 @@ def main() -> None:
                     symbol_lines.append(err_line)
                     logging.exception("symbol loop failed: %s", symbol)
                     notify_safe(notifier, f"[SYMBOL ERROR] {err_line}")
+
+            logging.info("[EXECUTION PHASE] executing %d planned symbol decision(s)", len(pending_trade_decisions))
+            for decision in pending_trade_decisions:
+                symbol = str(decision["symbol"])
+                try:
+                    reconcile_ok = bool(decision["reconcile_ok"])
+                    position = decision["position"]
+                    has_position = bool(decision["has_position"])
+                    last_price = float(decision["last_price"])
+                    action = str(decision["action"]).upper()
+                    fraction = float(decision["fraction"])
+                    stance = str(decision["stance"]).upper()
+                    streak = int(decision["streak"])
+                    regime = str(decision["regime"])
+                    regime_flipped = bool(decision["regime_flipped"])
+                    regime_params = decision["regime_params"]
+                    profile_risk_limits = decision["profile_risk_limits"]
+                    effective_profile = str(decision["effective_profile"])
+                    profile_reason = str(decision["profile_reason"])
+                    total_score = float(decision["total_score"])
+                    tpsl_decision = decision["tpsl_decision"]
+                    tpsl_note = str(decision["tpsl_note"])
+                    rumor = decision["rumor"]
+
+                    order_result = None
+                    execution_note = "no_order"
+
+                    if action in {"BUY", "STRONG_BUY"}:
+                        if trading_control["entries_blocked"]:
+                            execution_note = str(trading_control["entry_block_reason"])
+                        elif not reconcile_ok:
+                            execution_note = "blocked:reconcile_fail"
+                        elif not has_position:
+                            if positions_repo.count_open() >= settings.max_open_positions:
+                                execution_note = "blocked:max_positions"
+                            elif float(cycle_free_usdt) < settings.min_free_usdt:
+                                execution_note = "blocked:low_cash"
+                            else:
+                                desired_quote = float(portfolio["total_balance"]) * fraction
+                                max_cash_usable = max(0.0, float(cycle_free_usdt) - settings.min_free_usdt)
+                                quote_amount = min(desired_quote, max_cash_usable)
+                                logging.info(
+                                    "[ENTRY BUDGET] %s desired_quote=%.4f cycle_free_usdt=%.4f max_cash_usable=%.4f quote_amount=%.4f",
+                                    symbol,
+                                    desired_quote,
+                                    float(cycle_free_usdt),
+                                    max_cash_usable,
+                                    quote_amount,
+                                )
+
+                                if quote_amount >= settings.min_order_quote_usdt:
+                                    risk_portfolio = dict(portfolio)
+                                    risk_portfolio["cash_balance"] = float(cycle_free_usdt)
+                                    total_balance_for_risk = float(risk_portfolio.get("total_balance") or 0.0)
+                                    risk_portfolio["cash_ratio"] = (
+                                        float(cycle_free_usdt) / total_balance_for_risk
+                                        if total_balance_for_risk > 0
+                                        else 0.0
+                                    )
+                                    allowed, risk_quote_amount, risk_reason = risk_engine.check_entry(
+                                        symbol=symbol,
+                                        portfolio=risk_portfolio,
+                                        position=position,
+                                        desired_quote=quote_amount,
+                                        last_price=last_price,
+                                        risk_limits=profile_risk_limits,
+                                    )
+                                    if not allowed:
+                                        execution_note = f"blocked:risk:{risk_reason}"
+                                        logging.info(
+                                            "[RISK ENTRY] %s allow=%s desired_quote=%.4f adjusted_quote=%.4f reason=%s cash_balance=%.4f total_balance=%.4f",
+                                            symbol,
+                                            allowed,
+                                            quote_amount,
+                                            risk_quote_amount,
+                                            risk_reason,
+                                            float(risk_portfolio.get("cash_balance") or 0.0),
+                                            float(risk_portfolio.get("total_balance") or 0.0),
+                                        )
+                                    else:
+                                        if float(risk_quote_amount) != float(quote_amount):
+                                            logging.info(
+                                                "[RISK ENTRY] %s allow=%s desired_quote=%.4f adjusted_quote=%.4f reason=%s",
+                                                symbol,
+                                                allowed,
+                                                quote_amount,
+                                                risk_quote_amount,
+                                                risk_reason,
+                                            )
+                                        quote_amount = float(risk_quote_amount)
+                                        order_result = execution.place_entry(
+                                            symbol=symbol,
+                                            quote_amount=quote_amount,
+                                            reason=f"initial_entry regime={regime} action={action} score={total_score} streak={streak}",
+                                            intent="initial_entry",
+                                        )
+                                        if order_result and order_result.get("ok"):
+                                            cycle_free_usdt = max(0.0, float(cycle_free_usdt) - float(quote_amount))
+                                            execution_note = f"initial_entry_sent:{action.lower()}"
+                                            logging.info(
+                                                "[CASH] %s initial_entry_reserved quote_amount=%.4f cycle_free_usdt=%.4f",
+                                                symbol,
+                                                quote_amount,
+                                                float(cycle_free_usdt),
+                                            )
+                                            if settings.dry_run and order_result.get("dry_run"):
+                                                _dry_qty = quote_amount / last_price if last_price > 0 else 0.0
+                                                _dry_trade_id = f"dry_{order_result.get('client_order_id', '')}"
+                                                try:
+                                                    fills_repo.insert(
+                                                        trade_id=_dry_trade_id,
+                                                        order_id=None,
+                                                        client_order_id=order_result.get("client_order_id"),
+                                                        symbol=symbol,
+                                                        side="buy",
+                                                        qty=_dry_qty,
+                                                        price=last_price,
+                                                        cost=quote_amount,
+                                                        fee_cost=quote_amount * 0.001,
+                                                        fee_currency="USDT",
+                                                        timestamp_ms=int(time.time() * 1000),
+                                                        realized_pnl_quote=0.0,
+                                                        exit_reason=None,
+                                                    )
+                                                    reconciler.sync_symbol(symbol)
+                                                    logging.info("[DRY SIM BUY] %s qty=%.8f price=%.6f", symbol, _dry_qty, last_price)
+                                                except Exception as _dry_exc:
+                                                    logging.warning("[DRY SIM BUY ERROR] %s %s", symbol, _dry_exc)
+                                        else:
+                                            execution_note = f"blocked:entry_failed:{(order_result or {}).get('reason', 'unknown')}"
+                                else:
+                                    execution_note = "blocked:too_small"
+                        else:
+                            if not settings.scale_in_enabled:
+                                execution_note = "blocked:already_in_position"
+                            elif not reconcile_ok:
+                                execution_note = "blocked:reconcile_fail"
+                            else:
+                                scale_in_allowed, scale_in_reason = position_manager.can_scale_in(position, last_price)
+                                if not scale_in_allowed:
+                                    execution_note = f"blocked:scale_in:{scale_in_reason}"
+                                else:
+                                    trigger = settings.strong_scale_in_trigger_streak if action == "STRONG_BUY" else settings.scale_in_trigger_streak
+                                    if streak < trigger:
+                                        execution_note = f"blocked:scale_in_wait_streak({streak}/{trigger})"
+                                    else:
+                                        _max_scale_in = int(getattr(settings, "max_scale_in_count", 3))
+                                        _scale_key = f"scale_in_count:{symbol}"
+                                        _scale_state = bot_state_repo.get(_scale_key) or {}
+                                        _scale_count = int(_scale_state.get("count") or 0)
+                                        if _scale_count >= _max_scale_in:
+                                            execution_note = f"blocked:max_scale_in_count({_scale_count}/{_max_scale_in})"
+                                            logging.info("[SCALE GUARD] %s blocked count=%d max=%d", symbol, _scale_count, _max_scale_in)
+                                        else:
+                                            position_value = compute_position_value(position, last_price)
+                                            total_balance = max(float(portfolio["total_balance"]), 1e-12)
+                                            scale_fraction = settings.strong_scale_in_buy_pct if action == "STRONG_BUY" else settings.scale_in_buy_pct
+                                            desired_quote = total_balance * scale_fraction
+                                            exposure_cap_quote = max(0.0, total_balance * profile_risk_limits["max_symbol_exposure_pct"] - position_value)
+                                            cash_cap_quote = max(0.0, float(cycle_free_usdt) - settings.min_free_usdt)
+                                            quote_amount = min(desired_quote, exposure_cap_quote, cash_cap_quote)
+                                            logging.info(
+                                                "[SCALE BUDGET] %s desired_quote=%.4f exposure_cap_quote=%.4f cycle_free_usdt=%.4f cash_cap_quote=%.4f quote_amount=%.4f",
+                                                symbol,
+                                                desired_quote,
+                                                exposure_cap_quote,
+                                                float(cycle_free_usdt),
+                                                cash_cap_quote,
+                                                quote_amount,
+                                            )
+
+                                            if quote_amount >= settings.min_order_quote_usdt:
+                                                risk_portfolio = dict(portfolio)
+                                                risk_portfolio["cash_balance"] = float(cycle_free_usdt)
+                                                total_balance_for_risk = float(risk_portfolio.get("total_balance") or 0.0)
+                                                risk_portfolio["cash_ratio"] = (
+                                                    float(cycle_free_usdt) / total_balance_for_risk
+                                                    if total_balance_for_risk > 0
+                                                    else 0.0
+                                                )
+                                                allowed, risk_quote_amount, risk_reason = risk_engine.check_entry(
+                                                    symbol=symbol,
+                                                    portfolio=risk_portfolio,
+                                                    position=position,
+                                                    desired_quote=quote_amount,
+                                                    last_price=last_price,
+                                                    risk_limits=profile_risk_limits,
+                                                )
+                                                if not allowed:
+                                                    execution_note = f"blocked:risk:{risk_reason}"
+                                                    logging.info(
+                                                        "[RISK ENTRY] %s allow=%s desired_quote=%.4f adjusted_quote=%.4f reason=%s cash_balance=%.4f total_balance=%.4f",
+                                                        symbol,
+                                                        allowed,
+                                                        quote_amount,
+                                                        risk_quote_amount,
+                                                        risk_reason,
+                                                        float(risk_portfolio.get("cash_balance") or 0.0),
+                                                        float(risk_portfolio.get("total_balance") or 0.0),
+                                                    )
+                                                else:
+                                                    if float(risk_quote_amount) != float(quote_amount):
+                                                        logging.info(
+                                                            "[RISK ENTRY] %s allow=%s desired_quote=%.4f adjusted_quote=%.4f reason=%s",
+                                                            symbol,
+                                                            allowed,
+                                                            quote_amount,
+                                                            risk_quote_amount,
+                                                            risk_reason,
+                                                        )
+                                                    quote_amount = float(risk_quote_amount)
+                                                    order_result = execution.place_entry(
+                                                        symbol=symbol,
+                                                        quote_amount=quote_amount,
+                                                        reason=f"scale_in regime={regime} action={action} score={total_score} streak={streak}",
+                                                        intent="scale_in",
+                                                    )
+                                                    if order_result and order_result.get("ok"):
+                                                        cycle_free_usdt = max(0.0, float(cycle_free_usdt) - float(quote_amount))
+                                                        execution_note = f"scale_in_sent:{action.lower()}:streak={streak}"
+                                                        logging.info(
+                                                            "[CASH] %s scale_in_reserved quote_amount=%.4f cycle_free_usdt=%.4f",
+                                                            symbol,
+                                                            quote_amount,
+                                                            float(cycle_free_usdt),
+                                                        )
+                                                        _scale_count += 1
+                                                        bot_state_repo.set(
+                                                            _scale_key,
+                                                            {"count": _scale_count, "updated_at_ms": int(time.time() * 1000)},
+                                                            int(time.time() * 1000),
+                                                        )
+                                                        if settings.dry_run and order_result.get("dry_run"):
+                                                            _dry_qty = quote_amount / last_price if last_price > 0 else 0.0
+                                                            _dry_trade_id = f"dry_{order_result.get('client_order_id', '')}"
+                                                            try:
+                                                                fills_repo.insert(
+                                                                    trade_id=_dry_trade_id,
+                                                                    order_id=None,
+                                                                    client_order_id=order_result.get("client_order_id"),
+                                                                    symbol=symbol,
+                                                                    side="buy",
+                                                                    qty=_dry_qty,
+                                                                    price=last_price,
+                                                                    cost=quote_amount,
+                                                                    fee_cost=quote_amount * 0.001,
+                                                                    fee_currency="USDT",
+                                                                    timestamp_ms=int(time.time() * 1000),
+                                                                    realized_pnl_quote=0.0,
+                                                                    exit_reason=None,
+                                                                )
+                                                                reconciler.sync_symbol(symbol)
+                                                                logging.info("[DRY SIM SCALE] %s qty=%.8f price=%.6f", symbol, _dry_qty, last_price)
+                                                            except Exception as _dry_exc:
+                                                                logging.warning("[DRY SIM SCALE ERROR] %s %s", symbol, _dry_exc)
+                                                    else:
+                                                        execution_note = f"blocked:scale_in_failed:{(order_result or {}).get('reason', 'unknown')}"
+                                            else:
+                                                execution_note = "blocked:scale_in_too_small"
+
+                    elif action in {"FULL_CLOSE", "PARTIAL_CLOSE"}:
+                        if has_position:
+                            position_qty = float(position["qty"])
+                            target_sell_qty = position_qty if action == "FULL_CLOSE" else position_qty * settings.partial_sell_ratio
+                            free_base_qty = get_free_base_qty(exchange, symbol)
+                            if free_base_qty <= 1e-12:
+                                execution_note = "blocked:no_free_balance"
+                                logging.warning(
+                                    f"[SAFE EXIT BLOCK] {symbol} position_qty={position_qty} target_sell_qty={target_sell_qty} free_base_qty={free_base_qty}"
+                                )
+                            else:
+                                sell_qty = min(target_sell_qty, free_base_qty)
+                                if sell_qty <= 1e-12:
+                                    execution_note = "blocked:no_sellable_qty"
+                                    logging.warning(
+                                        f"[SAFE EXIT BLOCK] {symbol} position_qty={position_qty} target_sell_qty={target_sell_qty} free_base_qty={free_base_qty}"
+                                    )
+                                else:
+                                    order_result = execution.place_exit(
+                                        symbol=symbol,
+                                        base_qty=sell_qty,
+                                        reason=f"action={action} regime={regime} score={total_score} streak={streak} tpsl_reason={tpsl_decision['reason']}",
+                                    )
+                                    if order_result and order_result.get("ok"):
+                                        execution_note = f"exit_sent:{action.lower()}"
+                                        _exit_reason = tpsl_decision["reason"] if tpsl_decision["triggered"] else f"indicator_{action.lower()}"
+                                        bot_state_repo.set(
+                                            f"pending_exit_reason:{symbol}",
+                                            {"reason": _exit_reason, "client_order_id": order_result.get("client_order_id")},
+                                            int(time.time() * 1000),
+                                        )
+                                        bot_state_repo.delete(f"scale_in_count:{symbol}")
+                                        if settings.dry_run and order_result.get("dry_run"):
+                                            _dry_trade_id = f"dry_{order_result.get('client_order_id', '')}"
+                                            _dry_avg = float((position or {}).get("avg_entry_price") or last_price)
+                                            _dry_realized = sell_qty * (last_price - _dry_avg)
+                                            try:
+                                                fills_repo.insert(
+                                                    trade_id=_dry_trade_id,
+                                                    order_id=None,
+                                                    client_order_id=order_result.get("client_order_id"),
+                                                    symbol=symbol,
+                                                    side="sell",
+                                                    qty=sell_qty,
+                                                    price=last_price,
+                                                    cost=sell_qty * last_price,
+                                                    fee_cost=sell_qty * last_price * 0.001,
+                                                    fee_currency="USDT",
+                                                    timestamp_ms=int(time.time() * 1000),
+                                                    realized_pnl_quote=_dry_realized,
+                                                    exit_reason=_exit_reason,
+                                                )
+                                                reconciler.sync_symbol(symbol)
+                                                logging.info("[DRY SIM SELL] %s qty=%.8f price=%.6f realized=%.4f", symbol, sell_qty, last_price, _dry_realized)
+                                            except Exception as _dry_exc:
+                                                logging.warning("[DRY SIM SELL ERROR] %s %s", symbol, _dry_exc)
+                                    else:
+                                        execution_note = f"blocked:exit_failed:{(order_result or {}).get('reason', 'unknown')}"
+                        else:
+                            execution_note = "blocked:no_position"
+                    else:
+                        execution_note = "hold"
+
+                    if not trading_control["panic_mode"]:
+                        if execution_note.startswith("exit_sent:"):
+                            streak = reset_signal_streak(bot_state_repo, signal_state, symbol, "exit_sent")
+                        elif (
+                            execution_note.startswith("blocked:scale_in:scale_in_only_on_pullback")
+                            or execution_note.startswith("blocked:max_scale_in_count")
+                            or execution_note.startswith("blocked:scale_in:invalid_avg")
+                            or execution_note.startswith("blocked:scale_in:invalid_last_price")
+                        ):
+                            streak = decay_signal_streak(
+                                bot_state_repo,
+                                signal_state,
+                                symbol,
+                                max(1, int(getattr(settings, "scale_in_trigger_streak", 3) or 3)),
+                                execution_note,
+                            )
+                        elif not has_position:
+                            streak = reset_signal_streak(bot_state_repo, signal_state, symbol, "no_position")
+                        elif regime_flipped:
+                            streak = reset_signal_streak(bot_state_repo, signal_state, symbol, "regime_flip")
+
+                    pos_text = "none"
+                    if has_position and position:
+                        pos_text = (
+                            f"qty={float(position['qty']):.8f} avg={float(position['avg_entry_price']):.6f} realized={float(position['realized_pnl_quote']):.4f}"
+                        )
+
+                    order_text = execution_note if order_result is None else str(order_result)
+                    groq_provider = next((p for p in rumor.get("providers", []) if p["provider"] == "groq"), None)
+                    groq_text = ""
+                    ai_text = ""
+                    if groq_provider and settings.llm_enabled:
+                        groq_score = groq_provider.get("rumor_score", 0)
+                        groq_stance = groq_provider.get("stance", "N/A")
+                        groq_summary = groq_provider.get("summary", "")[:50]
+                        groq_text = f" | groq={groq_stance}({groq_score}) {groq_summary}..."
+                    if regime_params.get("ai_adjusted"):
+                        ai_text = " [AI_THRESHOLDS]"
+                    thresholds_text = (
+                        f"buy={float(regime_params.get('buy_threshold') or 0.0):.2f} "
+                        f"strong_buy={float(regime_params.get('strong_buy_threshold') or 0.0):.2f} "
+                        f"sell={float(regime_params.get('sell_threshold') or 0.0):.2f} "
+                        f"strong_sell={float(regime_params.get('strong_sell_threshold') or 0.0):.2f}"
+                    )
+                    log_line = (
+                        f"{symbol}{ai_text} | profile={effective_profile}:{profile_reason} | regime={regime} | total={total_score:.2f} | action={action} | stance={stance} | streak={streak} "
+                        f"| thresholds={thresholds_text} | position={pos_text} | tpsl={tpsl_note} | exec={order_text}{groq_text}"
+                    )
+                    symbol_lines.append(log_line)
+                    logging.info(log_line)
+
+                except Exception as execution_exc:
+                    status = "PARTIAL_FAIL"
+                    err_text = _telegram_shorten(str(execution_exc), 180)
+                    try:
+                        position = decision.get("position")
+                        has_position = bool(decision.get("has_position"))
+                        regime_params = decision.get("regime_params") or {}
+                        rumor = decision.get("rumor") or {}
+
+                        pos_text = "none"
+                        if has_position and position:
+                            pos_text = (
+                                f"qty={float(position['qty']):.8f} avg={float(position['avg_entry_price']):.6f} realized={float(position['realized_pnl_quote']):.4f}"
+                            )
+
+                        groq_provider = next((p for p in rumor.get("providers", []) if p["provider"] == "groq"), None)
+                        groq_text = ""
+                        ai_text = " [AI_THRESHOLDS]" if regime_params.get("ai_adjusted") else ""
+                        if groq_provider and settings.llm_enabled:
+                            groq_score = groq_provider.get("rumor_score", 0)
+                            groq_stance = groq_provider.get("stance", "N/A")
+                            groq_summary = groq_provider.get("summary", "")[:50]
+                            groq_text = f" | groq={groq_stance}({groq_score}) {groq_summary}..."
+                        thresholds_text = (
+                            f"buy={float(regime_params.get('buy_threshold') or 0.0):.2f} "
+                            f"strong_buy={float(regime_params.get('strong_buy_threshold') or 0.0):.2f} "
+                            f"sell={float(regime_params.get('sell_threshold') or 0.0):.2f} "
+                            f"strong_sell={float(regime_params.get('strong_sell_threshold') or 0.0):.2f}"
+                        )
+
+                        err_line = (
+                            f"{symbol}{ai_text} | profile={decision.get('effective_profile')}:{decision.get('profile_reason')} "
+                            f"| regime={decision.get('regime')} | total={float(decision.get('total_score') or 0.0):.2f} "
+                            f"| action={str(decision.get('action') or 'N/A').upper()} | stance={str(decision.get('stance') or 'N/A').upper()} "
+                            f"| streak={decision.get('streak')} | thresholds={thresholds_text} | position={pos_text} | tpsl={decision.get('tpsl_note')} "
+                            f"| exec=blocked:execution_error:{err_text}{groq_text}"
+                        )
+                    except Exception:
+                        err_line = f"{symbol} | ERROR | execution_error:{err_text}"
+                    symbol_lines.append(err_line)
+                    logging.exception("execution phase failed: %s", symbol)
+                    notify_safe(notifier, f"[EXECUTION ERROR] {symbol} {err_text}")
 
             logging.info("[CASH] cycle_end cycle_free_usdt=%.4f portfolio_cash_balance_snapshot=%.4f", float(cycle_free_usdt), float(portfolio["cash_balance"]))
 
@@ -2830,6 +3613,8 @@ def main() -> None:
                 reconciler=reconciler,
                 execution=execution,
                 positions_repo=positions_repo,
+                orders_repo=orders_repo,
+                locks_repo=locks_repo,
                 portfolio_engine=portfolio_engine,
                 exchange=exchange,
                 bot_state_repo=bot_state_repo,

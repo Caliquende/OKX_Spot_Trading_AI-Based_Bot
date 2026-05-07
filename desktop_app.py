@@ -139,6 +139,29 @@ class BotDataStore:
             con.execute(sql, params)
             con.commit()
 
+    def purge_unconfigured_positions(self) -> int:
+        if not self.configured_symbol_set:
+            return 0
+        placeholders = ", ".join("?" for _ in self.configured_symbol_set)
+        params = tuple(sorted(self.configured_symbol_set))
+        with self._connect() as con:
+            row = con.execute(
+                f"SELECT COUNT(*) AS c FROM positions WHERE UPPER(symbol) NOT IN ({placeholders})",
+                params,
+            ).fetchone()
+            con.execute(
+                f"DELETE FROM positions WHERE UPPER(symbol) NOT IN ({placeholders})",
+                params,
+            )
+            con.commit()
+        return int(row["c"]) if row else 0
+
+    def normalize_position_statuses(self) -> None:
+        with self._connect() as con:
+            con.execute("UPDATE positions SET status = 'OPEN' WHERE qty > 0 AND status != 'OPEN'")
+            con.execute("UPDATE positions SET status = 'CLOSED' WHERE qty <= 0 AND status != 'CLOSED'")
+            con.commit()
+
     def get_bot_state(self, key: str) -> Any:
         row = self.fetch_one("SELECT value FROM bot_state WHERE key = ?", (key,))
         if not row:
@@ -188,7 +211,7 @@ class BotDataStore:
             """
             SELECT *
             FROM positions
-            WHERE status = 'OPEN' AND qty > 0
+            WHERE qty > 0
             ORDER BY symbol ASC
             """
         )
@@ -209,7 +232,7 @@ class BotDataStore:
         visible: list[dict[str, Any]] = []
         for row in rows:
             symbol = str(row.get("symbol") or "").upper()
-            is_open = str(row.get("status") or "").upper() == "OPEN" and float(row.get("qty") or 0.0) > 0
+            is_open = float(row.get("qty") or 0.0) > 0
             if symbol in self.configured_symbol_set or is_open:
                 visible.append(row)
         return visible
@@ -220,7 +243,7 @@ class BotDataStore:
         stale: list[dict[str, Any]] = []
         for row in self.all_positions():
             symbol = str(row.get("symbol") or "").upper()
-            is_open = str(row.get("status") or "").upper() == "OPEN" and float(row.get("qty") or 0.0) > 0
+            is_open = float(row.get("qty") or 0.0) > 0
             if symbol not in self.configured_symbol_set and not is_open:
                 stale.append(row)
         return stale
@@ -527,8 +550,13 @@ class BotDesktopApp(tk.Tk):
             self.banner_text.set("DB unavailable")
             self.banner_detail.set(error)
             return
+        self.store.normalize_position_statuses()
+        removed = self.store.purge_unconfigured_positions()
         self.last_refresh_text.set(f"Last refresh: {datetime.now().strftime('%H:%M:%S')}")
         self.status_text.set(f"DB: {self.store.db_path}")
+        if removed:
+            self.banner_text.set("DB cleaned")
+            self.banner_detail.set(f"Removed {removed} position row(s) not listed in SYMBOLS.")
         if self.active_screen == "overview":
             self._render_overview()
         elif self.active_screen == "signals":
@@ -736,7 +764,7 @@ class BotDesktopApp(tk.Tk):
             )
 
     def _build_positions(self) -> None:
-        frame = self._panel(self.content, 0, 0, "Positions", "SQLite positions snapshot. Market price yoksa PnL tahmini yapılmaz.")
+        frame = self._panel(self.content, 0, 0, "Positions", "SQLite positions snapshot. Borsada miktar varsa min trade değerinden bağımsız OPEN görünür.")
         self.positions_tree = self._make_tree(
             frame,
             ("symbol", "source", "qty", "avg", "realized", "fees", "status", "updated"),

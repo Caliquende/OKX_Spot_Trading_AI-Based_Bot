@@ -27,12 +27,12 @@ class PositionManager:
         Scale-in kontrolü
 
         Kritik kural:
-        ❌ Loser'a ekleme YOK
-        ✔ Winner'a ekleme VAR
+        ✔ Duserken ekleme VAR
+        ❌ Yukselirken ekleme YOK
 
         Bu fonksiyon:
-        - mevcut pozisyon kârlı mı?
-        - değilse scale-in bloklar
+        - fiyat ortalama maliyetin altinda mi?
+        - degilse scale-in bloklar
         """
 
         if not position:
@@ -43,11 +43,11 @@ class PositionManager:
         if avg <= 0:
             return False, "invalid_avg"
 
-        # 🔴 CORE LOGIC
-        if last_price < avg:
-            # Fiyat ortalama maliyetin altındaysa zarardayız.
-            # Bu tasarıma göre zarar eden pozisyona ekleme yapmıyoruz.
-            return False, "no_scale_in_on_loser"
+        if last_price <= 0:
+            return False, "invalid_last_price"
+
+        if last_price >= avg:
+            return False, "scale_in_only_on_pullback"
 
         return True, "ok"
 

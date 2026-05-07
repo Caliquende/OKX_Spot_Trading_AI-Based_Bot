@@ -28,6 +28,7 @@ class RiskEngine:
         position: dict | None,
         desired_quote: float,
         last_price: float,
+        risk_limits: dict | None = None,
     ) -> tuple[bool, float, str]:
         # Yeni entry izinli mi, izinliyse maksimum ne kadar quote kullanılabilir?
         # Bu sorunun cevabını döndürür.
@@ -35,12 +36,16 @@ class RiskEngine:
         total_balance = float(portfolio.get("total_balance") or 0.0)
         cash_balance = float(portfolio.get("cash_balance") or 0.0)
         min_free_usdt = float(getattr(self.settings, "min_free_usdt", 0.0) or 0.0)
+        limits = risk_limits or {}
+        max_single_trade_pct = float(limits.get("max_single_trade_pct", self.max_single_trade_pct))
+        max_total_exposure_pct = float(limits.get("max_total_exposure_pct", self.max_total_exposure_pct))
+        max_symbol_exposure_pct = float(limits.get("max_symbol_exposure_pct", self.settings.max_symbol_exposure_pct))
 
         if total_balance <= 0:
             return False, 0.0, "invalid_total_balance"
 
         # -------- 1. single trade cap --------
-        max_trade_quote = total_balance * self.max_single_trade_pct
+        max_trade_quote = total_balance * max_single_trade_pct
         cash_usable_quote = max(0.0, cash_balance - min_free_usdt)
 
         allowed_quote = min(desired_quote, max_trade_quote, cash_usable_quote)
@@ -49,12 +54,12 @@ class RiskEngine:
         deployed = total_balance - cash_balance
         current_exposure_pct = deployed / total_balance
 
-        if current_exposure_pct >= self.max_total_exposure_pct:
+        if current_exposure_pct >= max_total_exposure_pct:
             return False, 0.0, "max_total_exposure_reached"
 
         remaining_total_exposure_quote = max(
             0.0,
-            total_balance * self.max_total_exposure_pct - deployed,
+            total_balance * max_total_exposure_pct - deployed,
         )
         allowed_quote = min(allowed_quote, remaining_total_exposure_quote)
 
@@ -68,7 +73,7 @@ class RiskEngine:
             position_value = float(position["qty"] or 0.0) * last_price
         remaining_symbol_quote = max(
             0.0,
-            total_balance * self.settings.max_symbol_exposure_pct - position_value,
+            total_balance * max_symbol_exposure_pct - position_value,
         )
         allowed_quote = min(allowed_quote, remaining_symbol_quote)
 

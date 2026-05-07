@@ -42,9 +42,8 @@ class TPSLEngine:
 
         qty = float(position.get("qty") or 0.0)
         avg = float(position.get("avg_entry_price") or 0.0)
-        status = str(position.get("status") or "").upper()
 
-        if status != "OPEN" or qty <= 1e-12:
+        if qty <= 1e-12:
             self.clear_symbol_state(symbol)
             return None
 
@@ -100,9 +99,8 @@ class TPSLEngine:
 
         qty = float(position.get("qty") or 0.0)
         avg = float(position.get("avg_entry_price") or 0.0)
-        status = str(position.get("status") or "").upper()
 
-        if status != "OPEN" or qty <= 1e-12 or last_price <= 0:
+        if qty <= 1e-12 or last_price <= 0:
             self.clear_symbol_state(symbol)
             result["reason"] = "invalid_open_position"
             return result

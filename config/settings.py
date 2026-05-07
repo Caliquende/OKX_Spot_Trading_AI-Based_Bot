@@ -82,6 +82,183 @@ def _load_project_env() -> None:
 _load_project_env()
 
 
+STRATEGY_PROFILE_DEFAULTS: dict[str, dict[str, float | int]] = {
+    "conservative": {
+        "buy_threshold": 5.0,
+        "strong_buy_threshold": 8.0,
+        "sell_threshold": -3.5,
+        "strong_sell_threshold": -6.0,
+        "buy_pct": 0.01,
+        "strong_buy_pct": 0.02,
+        "max_symbol_exposure_pct": 0.10,
+        "max_total_exposure_pct": 0.35,
+        "max_single_trade_pct": 0.015,
+        "max_daily_drawdown_pct": 0.025,
+        "scale_in_trigger_streak": 3,
+        "strong_scale_in_trigger_streak": 3,
+        "scale_in_buy_pct": 0.005,
+        "strong_scale_in_buy_pct": 0.01,
+        "max_scale_in_count": 1,
+        "stop_loss_pct": 0.025,
+        "partial_take_profit_pct": 0.02,
+        "full_take_profit_pct": 0.045,
+        "break_even_activation_pct": 0.015,
+        "trailing_take_profit_activation_pct": 0.02,
+        "trailing_take_profit_giveback_pct": 0.008,
+        "regime_buy_threshold_trend": 4.5,
+        "regime_strong_buy_threshold_trend": 7.0,
+        "regime_buy_pct_trend": 0.012,
+        "regime_strong_buy_pct_trend": 0.02,
+        "regime_buy_threshold_range": 5.5,
+        "regime_strong_buy_threshold_range": 8.0,
+        "regime_buy_pct_range": 0.008,
+        "regime_strong_buy_pct_range": 0.015,
+        "regime_buy_threshold_chop": 7.0,
+        "regime_strong_buy_threshold_chop": 9.0,
+        "regime_buy_pct_chop": 0.005,
+        "regime_strong_buy_pct_chop": 0.01,
+        "regime_buy_threshold_volatile": 6.0,
+        "regime_strong_buy_threshold_volatile": 9.0,
+        "regime_buy_pct_volatile": 0.008,
+        "regime_strong_buy_pct_volatile": 0.015,
+    },
+    "balanced": {
+        "buy_threshold": 4.0,
+        "strong_buy_threshold": 8.0,
+        "sell_threshold": -4.0,
+        "strong_sell_threshold": -9.0,
+        "buy_pct": 0.02,
+        "strong_buy_pct": 0.04,
+        "max_symbol_exposure_pct": 0.15,
+        "max_total_exposure_pct": 0.50,
+        "max_single_trade_pct": 0.025,
+        "max_daily_drawdown_pct": 0.035,
+        "scale_in_trigger_streak": 3,
+        "strong_scale_in_trigger_streak": 3,
+        "scale_in_buy_pct": 0.008,
+        "strong_scale_in_buy_pct": 0.015,
+        "max_scale_in_count": 2,
+        "stop_loss_pct": 0.035,
+        "partial_take_profit_pct": 0.025,
+        "full_take_profit_pct": 0.06,
+        "break_even_activation_pct": 0.018,
+        "trailing_take_profit_activation_pct": 0.025,
+        "trailing_take_profit_giveback_pct": 0.01,
+        "regime_buy_threshold_trend": 4.0,
+        "regime_strong_buy_threshold_trend": 7.0,
+        "regime_buy_pct_trend": 0.02,
+        "regime_strong_buy_pct_trend": 0.035,
+        "regime_buy_threshold_range": 5.0,
+        "regime_strong_buy_threshold_range": 8.0,
+        "regime_buy_pct_range": 0.015,
+        "regime_strong_buy_pct_range": 0.025,
+        "regime_buy_threshold_chop": 6.5,
+        "regime_strong_buy_threshold_chop": 8.5,
+        "regime_buy_pct_chop": 0.008,
+        "regime_strong_buy_pct_chop": 0.015,
+        "regime_buy_threshold_volatile": 5.5,
+        "regime_strong_buy_threshold_volatile": 8.5,
+        "regime_buy_pct_volatile": 0.012,
+        "regime_strong_buy_pct_volatile": 0.025,
+    },
+    "aggressive": {
+        "buy_threshold": 3.5,
+        "strong_buy_threshold": 6.0,
+        "sell_threshold": -4.0,
+        "strong_sell_threshold": -8.0,
+        "buy_pct": 0.02,
+        "strong_buy_pct": 0.04,
+        "max_symbol_exposure_pct": 0.12,
+        "max_total_exposure_pct": 0.95,
+        "max_single_trade_pct": 0.04,
+        "max_daily_drawdown_pct": 0.05,
+        "scale_in_trigger_streak": 2,
+        "strong_scale_in_trigger_streak": 2,
+        "scale_in_buy_pct": 0.01,
+        "strong_scale_in_buy_pct": 0.02,
+        "max_scale_in_count": 2,
+        "stop_loss_pct": 0.032,
+        "partial_take_profit_pct": 0.025,
+        "full_take_profit_pct": 0.06,
+        "break_even_activation_pct": 0.018,
+        "trailing_take_profit_activation_pct": 0.025,
+        "trailing_take_profit_giveback_pct": 0.012,
+        "regime_buy_threshold_trend": 3.5,
+        "regime_strong_buy_threshold_trend": 6.0,
+        "regime_buy_pct_trend": 0.025,
+        "regime_strong_buy_pct_trend": 0.04,
+        "regime_buy_threshold_range": 4.0,
+        "regime_strong_buy_threshold_range": 7.0,
+        "regime_buy_pct_range": 0.018,
+        "regime_strong_buy_pct_range": 0.03,
+        "regime_buy_threshold_chop": 6.5,
+        "regime_strong_buy_threshold_chop": 8.0,
+        "regime_buy_pct_chop": 0.01,
+        "regime_strong_buy_pct_chop": 0.018,
+        "regime_buy_threshold_volatile": 5.0,
+        "regime_strong_buy_threshold_volatile": 8.0,
+        "regime_buy_pct_volatile": 0.02,
+        "regime_strong_buy_pct_volatile": 0.035,
+    },
+    "scalper": {
+        "buy_threshold": 3.0,
+        "strong_buy_threshold": 5.0,
+        "sell_threshold": -3.0,
+        "strong_sell_threshold": -6.0,
+        "buy_pct": 0.012,
+        "strong_buy_pct": 0.025,
+        "max_symbol_exposure_pct": 0.12,
+        "max_total_exposure_pct": 0.45,
+        "max_single_trade_pct": 0.02,
+        "max_daily_drawdown_pct": 0.03,
+        "scale_in_trigger_streak": 2,
+        "strong_scale_in_trigger_streak": 2,
+        "scale_in_buy_pct": 0.006,
+        "strong_scale_in_buy_pct": 0.012,
+        "max_scale_in_count": 2,
+        "stop_loss_pct": 0.018,
+        "partial_take_profit_pct": 0.012,
+        "full_take_profit_pct": 0.03,
+        "break_even_activation_pct": 0.01,
+        "trailing_take_profit_activation_pct": 0.014,
+        "trailing_take_profit_giveback_pct": 0.006,
+        "regime_buy_threshold_trend": 3.0,
+        "regime_strong_buy_threshold_trend": 5.0,
+        "regime_buy_pct_trend": 0.015,
+        "regime_strong_buy_pct_trend": 0.025,
+        "regime_buy_threshold_range": 3.8,
+        "regime_strong_buy_threshold_range": 6.0,
+        "regime_buy_pct_range": 0.012,
+        "regime_strong_buy_pct_range": 0.02,
+        "regime_buy_threshold_chop": 5.5,
+        "regime_strong_buy_threshold_chop": 7.0,
+        "regime_buy_pct_chop": 0.006,
+        "regime_strong_buy_pct_chop": 0.012,
+        "regime_buy_threshold_volatile": 5.0,
+        "regime_strong_buy_threshold_volatile": 7.0,
+        "regime_buy_pct_volatile": 0.008,
+        "regime_strong_buy_pct_volatile": 0.016,
+    },
+}
+
+
+def strategy_profile_names() -> set[str]:
+    return set(STRATEGY_PROFILE_DEFAULTS)
+
+
+def get_strategy_profile_values(profile: str) -> dict[str, float | int]:
+    normalized = str(profile or "").strip().lower()
+    if normalized not in STRATEGY_PROFILE_DEFAULTS:
+        allowed = ", ".join(sorted(STRATEGY_PROFILE_DEFAULTS))
+        raise RuntimeError(f"STRATEGY_PROFILE must be one of: {allowed}")
+
+    values: dict[str, float | int] = {}
+    for name, default_value in STRATEGY_PROFILE_DEFAULTS[normalized].items():
+        raw_value = _env(f"STRATEGY_{normalized.upper()}_{name.upper()}", str(default_value))
+        values[name] = int(raw_value) if isinstance(default_value, int) else float(raw_value)
+    return values
+
+
 def _env(name: str, default: str | None = None, required: bool = False) -> str:
     # TR: Tek bir env degiskenini oku. required=True ise eksikse hata ver.
     # EN: Read a single env variable. If required=True and it is missing, raise an error.
@@ -152,6 +329,7 @@ class Settings:
     db_path: str = _env_first(["DB_PATH", "SQLITE_PATH"], "trading.db")
     dry_run: bool = _env_bool("DRY_RUN", "true")
     strategy_profile: str = _env("STRATEGY_PROFILE", "balanced").strip().lower()
+    strategy_profile_mode: str = _env("STRATEGY_PROFILE_MODE", "dynamic").strip().lower()
 
     # ---------------- ORDER LIMITS ----------------
     min_order_quote_usdt: float = _env_float("MIN_ORDER_QUOTE_USDT", "10")
@@ -252,6 +430,15 @@ class Settings:
     preserve_position_on_balance_fetch_error: bool = _env_bool("PRESERVE_POSITION_ON_BALANCE_FETCH_ERROR", "true")
     reconcile_rebase_after_mismatch_count: int = _env_int("RECONCILE_REBASE_AFTER_MISMATCH_COUNT", "3")
 
+    # ---------------- DUST MAINTENANCE ----------------
+    dust_maintenance_mode: str = _env("DUST_MAINTENANCE_MODE", "auto_convert").strip().lower()
+    dust_candidate_max_value_usdt: float = _env_float("DUST_CANDIDATE_MAX_VALUE_USDT", "0.05")
+    dust_auto_convert_to_ccy: str = _env("DUST_AUTO_CONVERT_TO_CCY", "USDT").strip().upper()
+    dust_auto_convert_max_total_usdt: float = _env_float("DUST_AUTO_CONVERT_MAX_TOTAL_USDT", "0.25")
+    dust_auto_convert_max_assets_per_run: int = _env_int("DUST_AUTO_CONVERT_MAX_ASSETS_PER_RUN", "5")
+    dust_auto_convert_interval_minutes: int = _env_int("DUST_AUTO_CONVERT_INTERVAL_MINUTES", "360")
+    dust_easy_convert_source: str = _env("DUST_EASY_CONVERT_SOURCE", "1").strip()
+
     # ---------------- COOLDOWN ----------------
     symbol_cooldown_minutes: float = _env_float("SYMBOL_COOLDOWN_MINUTES", "60")
     scale_in_cooldown_minutes: float = _env_float("SCALE_IN_COOLDOWN_MINUTES", "2")
@@ -304,64 +491,26 @@ class Settings:
     log_level: str = _env("LOG_LEVEL", "INFO")
 
     def __post_init__(self) -> None:
-        if self.strategy_profile not in {"balanced", "aggressive"}:
-            raise RuntimeError("STRATEGY_PROFILE must be one of: balanced, aggressive")
+        if self.strategy_profile not in STRATEGY_PROFILE_DEFAULTS:
+            allowed = ", ".join(sorted(STRATEGY_PROFILE_DEFAULTS))
+            raise RuntimeError(f"STRATEGY_PROFILE must be one of: {allowed}")
+        if self.strategy_profile_mode not in {"manual", "dynamic"}:
+            raise RuntimeError("STRATEGY_PROFILE_MODE must be one of: manual, dynamic")
 
-        if self.strategy_profile == "aggressive":
-            self._apply_aggressive_profile()
+        self._apply_strategy_profile()
 
-    def _apply_aggressive_profile(self) -> None:
+    def _profile_env_name(self, setting_name: str) -> str:
+        return f"STRATEGY_{self.strategy_profile.upper()}_{setting_name.upper()}"
+
+    def _apply_strategy_profile(self) -> None:
         """
-        Aggressive profile lowers long-entry friction and tightens loss control.
+        Applies profile defaults, then lets profile-specific env values override them.
 
-        TR: Bu profil kar garantisi değildir. Amaç daha fazla fırsat yakalarken
-        exposure, stop ve drawdown sınırlarını aynı anda sıkı tutmaktır.
+        TR: Genel env degerleri once dataclass alanlarina okunur. Aktif strateji
+        profili daha sonra uygulanir. Profildeki her alan `.env` tarafindan
+        `STRATEGY_<PROFILE>_<SETTING>` formatiyla kontrol edilebilir.
         """
-        overrides = {
-            # Base signal gates.
-            "buy_threshold": 3.5,
-            "strong_buy_threshold": 6.0,
-            "sell_threshold": -4.0,
-            "strong_sell_threshold": -8.0,
-            "buy_pct": 0.02,
-            "strong_buy_pct": 0.04,
-            # Exposure and circuit breaker.
-            "max_symbol_exposure_pct": 0.20,
-            "max_total_exposure_pct": 0.60,
-            "max_single_trade_pct": 0.04,
-            "max_daily_drawdown_pct": 0.05,
-            # Scale-in only after a winning position proves itself.
-            "scale_in_trigger_streak": 2,
-            "strong_scale_in_trigger_streak": 2,
-            "scale_in_buy_pct": 0.01,
-            "strong_scale_in_buy_pct": 0.02,
-            "max_scale_in_count": 2,
-            # Faster loss control and profit capture.
-            "stop_loss_pct": 0.032,
-            "partial_take_profit_pct": 0.025,
-            "full_take_profit_pct": 0.06,
-            "break_even_activation_pct": 0.018,
-            "trailing_take_profit_activation_pct": 0.025,
-            "trailing_take_profit_giveback_pct": 0.012,
-            # Regime-specific signal gates and sizing.
-            "regime_buy_threshold_trend": 3.5,
-            "regime_strong_buy_threshold_trend": 6.0,
-            "regime_buy_pct_trend": 0.025,
-            "regime_strong_buy_pct_trend": 0.04,
-            "regime_buy_threshold_range": 4.0,
-            "regime_strong_buy_threshold_range": 7.0,
-            "regime_buy_pct_range": 0.018,
-            "regime_strong_buy_pct_range": 0.03,
-            "regime_buy_threshold_chop": 6.5,
-            "regime_strong_buy_threshold_chop": 8.0,
-            "regime_buy_pct_chop": 0.01,
-            "regime_strong_buy_pct_chop": 0.018,
-            "regime_buy_threshold_volatile": 5.0,
-            "regime_strong_buy_threshold_volatile": 8.0,
-            "regime_buy_pct_volatile": 0.02,
-            "regime_strong_buy_pct_volatile": 0.035,
-        }
-        for name, value in overrides.items():
+        for name, value in get_strategy_profile_values(self.strategy_profile).items():
             object.__setattr__(self, name, value)
 
 

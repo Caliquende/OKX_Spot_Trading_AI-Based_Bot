@@ -99,6 +99,51 @@ def test_rebuild_position_sandbox_fills_ignore(reconciler, mock_deps):
     args = mock_deps["positions_repo"].upsert.call_args[1]
     assert args["qty"] == 1.0 # Should use fills in sandbox zero balance
 
+def test_rebuild_position_preserves_small_confirmed_balance(reconciler, mock_deps):
+    mock_deps["exchange"].get_asset_total.return_value = 2.0
+    mock_deps["fills_repo"].by_symbol.return_value = [
+        {
+            "trade_id": "t1",
+            "timestamp_ms": 1000,
+            "side": "buy",
+            "qty": 2.0,
+            "price": 1.5,
+            "cost": 3.0,
+            "fee_cost": 0,
+            "fee_currency": "USDT",
+        }
+    ]
+    mock_deps["exchange"].fetch_ticker.return_value = {"last": 1.5}
+
+    reconciler._rebuild_position("NEAR/USDT")
+
+    args = mock_deps["positions_repo"].upsert.call_args[1]
+    assert args["qty"] == 2.0
+    assert args["status"] == "OPEN"
+
+def test_rebuild_position_preserves_balance_below_soft_zero_multiplier(reconciler, mock_deps):
+    mock_deps["exchange"].min_amount.return_value = 1.0
+    mock_deps["exchange"].get_asset_total.return_value = 2.297559282
+    mock_deps["fills_repo"].by_symbol.return_value = [
+        {
+            "trade_id": "t1",
+            "timestamp_ms": 1000,
+            "side": "buy",
+            "qty": 2.297559282,
+            "price": 1.4378,
+            "cost": 3.3036,
+            "fee_cost": 0,
+            "fee_currency": "USDT",
+        }
+    ]
+    mock_deps["exchange"].fetch_ticker.return_value = {"last": 1.4125}
+
+    reconciler._rebuild_position("XRP/USDT")
+
+    args = mock_deps["positions_repo"].upsert.call_args[1]
+    assert args["qty"] == 2.297559282
+    assert args["status"] == "OPEN"
+
 def test_meaningful_mismatch_low_diff(reconciler):
     # Small diff that is NOT meaningful
     assert not reconciler._meaningful_mismatch(1.0001, 1.0, 100, 5.0, 0.10)

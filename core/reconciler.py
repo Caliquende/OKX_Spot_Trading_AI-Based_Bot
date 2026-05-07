@@ -174,10 +174,9 @@ class Reconciler:
         s = self._settings()
         mode = str(getattr(s, "position_source_mode", "hybrid")).lower()
         pres_err = bool(getattr(s, "preserve_position_on_balance_fetch_error", True))
-        min_v = float(getattr(s, "min_position_value_usdt", 5.0))
         w_abs = float(getattr(s, "reconcile_warn_abs_quote_usdt", 5.0))
         w_rat = float(getattr(s, "reconcile_warn_ratio", 0.10))
-        soft_z = float(getattr(s, "reconcile_soft_zero_multiplier", 3.0)) * max(float(self.exchange.min_amount(symbol) or 0), 1e-12)
+        epsilon = max(float(getattr(s, "reconcile_epsilon", 1e-12) or 1e-12), 1e-12)
 
         f_qty, f_avg, realized, fees = self._build_from_fills(symbol)
         existing = self.positions_repo.get(symbol) or {}
@@ -189,28 +188,33 @@ class Reconciler:
         except: b_total = None
 
         ref = self._safe_last_price(symbol, f_avg, e_avg)
-        f_val, b_val = self._value(f_qty, ref), self._value(b_total or 0, ref)
         
         final_qty, final_avg = 0.0, 0.0
+        final_status = "CLOSED"
         if mode == "fills":
-            final_qty, final_avg = (f_qty, f_avg) if f_val >= min_v else (0.0, 0.0)
+            if f_qty > epsilon:
+                final_qty, final_avg, final_status = f_qty, f_avg, "OPEN"
         elif mode == "balance":
-            final_qty, final_avg = (b_total, f_avg or e_avg) if b_total and b_total > soft_z and b_val >= min_v else (0.0, 0.0)
+            if b_total and b_total > epsilon:
+                final_qty, final_avg = b_total, (f_avg or e_avg)
+                final_status = "OPEN"
         else: # HYBRID
             if b_total is None:
-                final_qty, final_avg = (f_qty, f_avg) if pres_err and f_val >= min_v else (0.0, 0.0)
-            elif b_total > soft_z and b_val >= min_v:
+                if pres_err and f_qty > epsilon:
+                    final_qty, final_avg, final_status = f_qty, f_avg, "OPEN"
+            elif b_total > epsilon:
                 final_qty, final_avg = b_total, (f_avg or e_avg)
+                final_status = "OPEN"
                 if self._meaningful_mismatch(f_qty, b_total, ref, w_abs, w_rat): self._register_mismatch(symbol)
                 else: self._clear_mismatch(symbol)
             else:
                 sbox = bool(getattr(getattr(self.exchange, "ex", None), "sandbox", False))
-                if sbox and f_val >= min_v: final_qty, final_avg = f_qty, f_avg
+                if sbox and f_qty > epsilon: final_qty, final_avg, final_status = f_qty, f_avg, "OPEN"
                 else: final_qty, final_avg = 0.0, 0.0; self._clear_mismatch(symbol)
 
-        if self._value(final_qty, ref) < min_v or final_qty <= soft_z: final_qty, final_avg = 0.0, 0.0
+        if final_qty <= epsilon:
+            final_qty, final_avg, final_status = 0.0, 0.0, "CLOSED"
         
-        status = "OPEN" if final_qty > 0 else "CLOSED"
         self.positions_repo.upsert(symbol=symbol, base_asset=symbol.split("/")[0], quote_asset=symbol.split("/")[1],
                                     qty=final_qty, avg_entry_price=final_avg, realized_pnl_quote=realized,
-                                    fees_quote=fees, status=status, now_ms=self.now_ms())
+                                    fees_quote=fees, status=final_status, now_ms=self.now_ms())
