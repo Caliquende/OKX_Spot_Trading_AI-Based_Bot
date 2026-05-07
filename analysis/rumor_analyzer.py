@@ -1074,7 +1074,9 @@ def refresh_all_if_needed(
     logger.info("[GROQ REFRESH] starting (%s) for %d symbols", refresh_reason, len(symbols))
 
     context_lines: list[str] = []
-    per_symbol_context_limit = int(getattr(settings, "bulk_refresh_max_context_chars_per_symbol", 420) or 420)
+    per_symbol_context_limit = int(getattr(settings, "bulk_refresh_max_context_chars_per_symbol", 260) or 260)
+    per_symbol_context_limit = max(120, min(320, per_symbol_context_limit))
+    news_context_limit = max(60, min(120, per_symbol_context_limit // 2))
     for sym in symbols:
         data = (market_data or {}).get(sym, {})
         symbol_lines = [f"SYMBOL={sym}"]
@@ -1083,21 +1085,25 @@ def refresh_all_if_needed(
                 "PRICE_ACTION=" + _format_price_action_context(data)
             )
         research_context = build_symbol_research_context(sym)
-        symbol_lines.append(f"NEWS={_compact_text(research_context or 'none', 220)}")
-        context_lines.append(_compact_context_lines(symbol_lines, per_line_limit=220, total_limit=per_symbol_context_limit))
+        symbol_lines.append(f"NEWS={_compact_text(research_context or 'none', news_context_limit)}")
+        context_lines.append(_compact_context_lines(symbol_lines, per_line_limit=160, total_limit=per_symbol_context_limit))
 
-    user_prompt = """Analyze each symbol below and return a JSON array with one item per symbol.
-Use only the supplied context. Keep reasoning very short.
-Mention news plus price action, support/resistance, or Fibonacci context in the reasoning when relevant.
-Do not say "generic news". If there is no real catalyst, say "no clear asset-specific catalyst".
-Do not reuse the same wording across symbols.
-Do not reuse the same score across symbols unless the conviction is genuinely almost identical.
-Stay conservative with scores unless there is clear asset-specific news plus confirmed price-action follow-through.
-If news is weak but structure is clearly weak, mild SELL is acceptable.
-If news is weak but structure is clearly constructive, mild BUY is acceptable.
-Range/compression without confirmation should usually stay between HOLD and a small directional lean, not a copy-paste neutral answer.
+    user_prompt = """Return a JSON array with one item per symbol.
+Use only the supplied context. Keep reasoning very short and symbol-specific.
+If there is no real catalyst, say "no clear asset-specific catalyst".
+Stay conservative unless news and price action confirm each other.
+Weak news with clearly weak/constructive structure may be mild SELL/BUY.
+Range/compression without confirmation should stay near HOLD.
 
 """ + "\n\n".join(context_lines)
+
+    logger.info(
+        "[GROQ REFRESH] prompt_budget symbols=%d chars=%d per_symbol_limit=%d news_limit=%d",
+        len(symbols),
+        len(user_prompt),
+        per_symbol_context_limit,
+        news_context_limit,
+    )
 
     payload = {
         "messages": [

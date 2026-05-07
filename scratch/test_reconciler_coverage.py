@@ -99,6 +99,56 @@ def test_rebuild_position_sandbox_fills_ignore(reconciler, mock_deps):
     args = mock_deps["positions_repo"].upsert.call_args[1]
     assert args["qty"] == 1.0 # Should use fills in sandbox zero balance
 
+def test_live_zero_balance_closes_even_with_historical_fills(reconciler, mock_deps):
+    mock_deps["exchange"].ex.sandbox = False
+    mock_deps["exchange"].settings.live_force_close_on_zero_balance = True
+    mock_deps["exchange"].get_asset_total.return_value = 0.0
+    mock_deps["fills_repo"].by_symbol.return_value = [
+        {
+            "trade_id": "t1",
+            "timestamp_ms": 1000,
+            "side": "buy",
+            "qty": 1,
+            "price": 100,
+            "cost": 100,
+            "fee_cost": 0,
+            "fee_currency": "USDT",
+        }
+    ]
+    mock_deps["exchange"].fetch_ticker.return_value = {"last": 100}
+
+    reconciler._rebuild_position("BTC/USDT")
+
+    args = mock_deps["positions_repo"].upsert.call_args[1]
+    assert args["qty"] == 0.0
+    assert args["avg_entry_price"] == 0.0
+    assert args["status"] == "CLOSED"
+
+def test_live_zero_balance_can_preserve_fills_when_configured(reconciler, mock_deps):
+    mock_deps["exchange"].ex.sandbox = False
+    mock_deps["exchange"].settings.live_force_close_on_zero_balance = False
+    mock_deps["exchange"].get_asset_total.return_value = 0.0
+    mock_deps["fills_repo"].by_symbol.return_value = [
+        {
+            "trade_id": "t1",
+            "timestamp_ms": 1000,
+            "side": "buy",
+            "qty": 1,
+            "price": 100,
+            "cost": 100,
+            "fee_cost": 0,
+            "fee_currency": "USDT",
+        }
+    ]
+    mock_deps["exchange"].fetch_ticker.return_value = {"last": 100}
+
+    reconciler._rebuild_position("BTC/USDT")
+
+    args = mock_deps["positions_repo"].upsert.call_args[1]
+    assert args["qty"] == 1.0
+    assert args["avg_entry_price"] == 100.0
+    assert args["status"] == "OPEN"
+
 def test_rebuild_position_preserves_small_confirmed_balance(reconciler, mock_deps):
     mock_deps["exchange"].get_asset_total.return_value = 2.0
     mock_deps["fills_repo"].by_symbol.return_value = [
