@@ -281,11 +281,8 @@ def apply_ai_thresholds_conservatively(regime_params: dict, ai_thresholds: dict)
             base_strong_buy,
             _clamp_float(ai_thresholds.get("strong_buy_threshold"), base_strong_buy, 1.0, 18.0),
         )
-        buy_pct = min(base_buy_pct, _clamp_float(ai_thresholds.get("buy_pct"), base_buy_pct, 0.001, 0.20))
-        strong_buy_pct = min(
-            base_strong_buy_pct,
-            _clamp_float(ai_thresholds.get("strong_buy_pct"), base_strong_buy_pct, 0.001, 0.25),
-        )
+        buy_pct = base_buy_pct
+        strong_buy_pct = base_strong_buy_pct
 
     sell_threshold = max(base_sell, _clamp_float(ai_thresholds.get("sell_threshold"), base_sell, -18.0, -1.0))
     strong_sell_threshold = max(
@@ -591,8 +588,14 @@ def _format_cycle_symbol_line(raw_line: str) -> list[str]:
             f"total {fields.get('total', 'N/A')} | "
             f"streak {fields.get('streak', 'N/A')}"
         ),
-        f"  Regime: {fields.get('regime', 'N/A')}",
     ]
+
+    regime = fields.get("regime", "N/A")
+    trend_bias = fields.get("trend_bias", "")
+    regime_line = f"  Regime: {regime}"
+    if str(regime).upper() == "TREND" and trend_bias:
+        regime_line = f"{regime_line} | bias {trend_bias}"
+    lines.append(regime_line)
 
     thresholds = fields.get("thresholds")
     if thresholds:
@@ -2674,6 +2677,7 @@ def main() -> None:
                             "stance": stance,
                             "streak": streak,
                             "regime": regime,
+                            "trend_bias": str(regime_diag.get("trend_bias") or ""),
                             "regime_flipped": regime_flipped,
                             "regime_params": regime_params,
                             "profile_risk_limits": profile_risk_limits,
@@ -3491,8 +3495,12 @@ def main() -> None:
                         f"sell={float(regime_params.get('sell_threshold') or 0.0):.2f} "
                         f"strong_sell={float(regime_params.get('strong_sell_threshold') or 0.0):.2f}"
                     )
+                    trend_bias_text = ""
+                    if str(regime).upper() == "TREND":
+                        trend_bias_text = f" | trend_bias={decision.get('trend_bias') or 'N/A'}"
+
                     log_line = (
-                        f"{symbol}{ai_text} | profile={effective_profile}:{profile_reason} | regime={regime} | total={total_score:.2f} | action={action} | stance={stance} | streak={streak} "
+                        f"{symbol}{ai_text} | profile={effective_profile}:{profile_reason} | regime={regime}{trend_bias_text} | total={total_score:.2f} | action={action} | stance={stance} | streak={streak} "
                         f"| thresholds={thresholds_text} | position={pos_text} | tpsl={tpsl_note} | exec={order_text}{groq_text}"
                     )
                     symbol_lines.append(log_line)
@@ -3528,9 +3536,14 @@ def main() -> None:
                             f"strong_sell={float(regime_params.get('strong_sell_threshold') or 0.0):.2f}"
                         )
 
+                        err_regime = str(decision.get("regime") or "N/A")
+                        err_trend_bias_text = ""
+                        if err_regime.upper() == "TREND":
+                            err_trend_bias_text = f" | trend_bias={decision.get('trend_bias') or 'N/A'}"
+
                         err_line = (
                             f"{symbol}{ai_text} | profile={decision.get('effective_profile')}:{decision.get('profile_reason')} "
-                            f"| regime={decision.get('regime')} | total={float(decision.get('total_score') or 0.0):.2f} "
+                            f"| regime={err_regime}{err_trend_bias_text} | total={float(decision.get('total_score') or 0.0):.2f} "
                             f"| action={str(decision.get('action') or 'N/A').upper()} | stance={str(decision.get('stance') or 'N/A').upper()} "
                             f"| streak={decision.get('streak')} | thresholds={thresholds_text} | position={pos_text} | tpsl={decision.get('tpsl_note')} "
                             f"| exec=blocked:execution_error:{err_text}{groq_text}"
