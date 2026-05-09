@@ -138,6 +138,12 @@ Treat Telegram command access as an operational control surface, not just an ale
 python main.py
 ```
 
+On Windows, the same main bot can be started from the repository root with:
+
+```powershell
+.\start_bot.bat
+```
+
 The main flow is roughly:
 
 1. Load settings.
@@ -177,6 +183,32 @@ To point it at a different SQLite file:
 
 ```powershell
 python desktop_app.py --db trading_bot.db
+```
+
+### Windows auto-start
+
+Use `start_bot.bat` for Windows startup automation. Test it manually first:
+
+```powershell
+.\start_bot.bat
+```
+
+To register a Task Scheduler task that starts the bot when the current user logs in, run PowerShell from the repository root:
+
+```powershell
+schtasks /Create /TN "OKX Spot Bot" /TR "`"$PWD\start_bot.bat`"" /SC ONLOGON /RL LIMITED /F
+```
+
+Operational notes:
+
+- The task runs under the current Windows user.
+- Keep `.env` configured before enabling the task.
+- Use `DRY_RUN=1` and `OKX_SANDBOX=1` until the startup path is verified.
+- Check `logs\bot.log` after login to confirm the bot actually started.
+- Disable it with:
+
+```powershell
+schtasks /Delete /TN "OKX Spot Bot" /F
 ```
 
 The desktop app does not send orders directly. It writes control flags into `bot_state`. According to `docs/desktop_app.md`, controls such as force refresh, pause trading, and panic mode are managed through that channel.

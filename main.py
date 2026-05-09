@@ -554,6 +554,45 @@ def _telegram_wrap(text: object, width: int = 88) -> list[str]:
     return textwrap.wrap(clean, width=width) or [clean]
 
 
+def _telegram_policy_explanation(reason: object) -> str:
+    reason_text = str(reason or "").strip()
+    reason_key = reason_text.rsplit(":", 1)[-1].strip()
+    explanations = {
+        "policy_block_range_without_mean_reversion": (
+            "BUY was produced in RANGE regime, but mean-reversion confirmation was missing; "
+            "the bot did not chase the move."
+        ),
+        "policy_block_range_weak_negative_ai": (
+            "RANGE regime had weak or negative AI influence, and the score did not reach strong-buy confirmation."
+        ),
+        "policy_block_trend_down_without_strong_reversal": (
+            "Trend bias was down; buys are allowed only with strong reversal confirmation."
+        ),
+        "policy_block_chop_aggressive_below_buy_threshold": (
+            "CHOP regime aggressive probe was blocked because the score stayed below the buy threshold."
+        ),
+        "policy_block_chop_aggressive_needs_ai_conviction": (
+            "CHOP regime aggressive probe needs stronger AI conviction."
+        ),
+        "policy_block_chop_aggressive_needs_positive_slope": (
+            "CHOP regime aggressive probe needs positive slope confirmation."
+        ),
+        "policy_block_chop_down_bias_negative_ai": (
+            "CHOP regime had down bias and negative AI influence, so the buy was blocked."
+        ),
+        "policy_block_chop_needs_strong_score": (
+            "CHOP regime requires strong-score confirmation before allowing a buy."
+        ),
+        "policy_block_volatile_without_breakout_confirmation": (
+            "VOLATILE regime blocked the buy because breakout or continuation confirmation was missing."
+        ),
+        "policy_block_exit_without_position": (
+            "An exit signal was produced, but there was no open position to close."
+        ),
+    }
+    return explanations.get(reason_key, reason_key or reason_text)
+
+
 def _format_cycle_symbol_line(raw_line: str) -> list[str]:
     raw = str(raw_line or "").strip()
     if not raw:
@@ -597,6 +636,10 @@ def _format_cycle_symbol_line(raw_line: str) -> list[str]:
         regime_line = f"{regime_line} | bias {trend_bias}"
     lines.append(regime_line)
 
+    profile = fields.get("profile")
+    if profile:
+        lines.append(f"  Profile: {_telegram_shorten(profile, 130)}")
+
     thresholds = fields.get("thresholds")
     if thresholds:
         lines.append(f"  Thresholds: {_telegram_shorten(thresholds, 130)}")
@@ -615,6 +658,11 @@ def _format_cycle_symbol_line(raw_line: str) -> list[str]:
     groq = fields.get("groq")
     if groq:
         lines.append(f"  Groq: {_telegram_shorten(groq, 130)}")
+
+    policy = fields.get("policy")
+    if policy and policy != "policy_ok":
+        lines.append(f"  Policy: {_telegram_shorten(policy, 130)}")
+        lines.append(f"  Why: {_telegram_shorten(_telegram_policy_explanation(policy), 180)}")
 
     return lines
 
@@ -962,7 +1010,26 @@ def reset_signal_streak(bot_state_repo: BotStateRepo, signal_state: dict, symbol
     logging.info("[STREAK RESET] %s reason=%s stance=NEUTRAL count=0", symbol, reason)
     # Scale-in counter da sıfırlanmalı: pozisyon kapandı, yeni giriş temiz başlamalı.
     bot_state_repo.delete(f"scale_in_count:{symbol}")
+    bot_state_repo.delete(f"scale_in_pullback_count:{symbol}")
     return 0
+
+
+def reset_scale_in_pullback_count(bot_state_repo: BotStateRepo, symbol: str) -> None:
+    bot_state_repo.delete(f"scale_in_pullback_count:{symbol}")
+
+
+def record_scale_in_pullback_count(
+    bot_state_repo: BotStateRepo,
+    symbol: str,
+    threshold: int,
+) -> tuple[int, bool]:
+    threshold = max(1, int(threshold or 1))
+    key = f"scale_in_pullback_count:{symbol}"
+    state = bot_state_repo.get(key) or {}
+    count = int(state.get("count") or 0) + 1
+    now_ms = int(time.time() * 1000)
+    bot_state_repo.set(key, {"count": count, "updated_at_ms": now_ms}, now_ms)
+    return count, count % threshold == 0
 
 
 def compute_position_value(position: dict | None, last_price: float) -> float:
@@ -2566,6 +2633,7 @@ def main() -> None:
                                 position_pnl_pct = (float(last_price) / _avg_for_policy) - 1.0
                         except Exception:
                             position_pnl_pct = None
+                    pre_policy_signal = dict(signal)
                     policy_signal, policy_reason = apply_regime_execution_policy(
                         signal=signal,
                         score=total_score,
@@ -2687,6 +2755,9 @@ def main() -> None:
                             "tpsl_decision": tpsl_decision,
                             "tpsl_note": tpsl_note,
                             "rumor": rumor,
+                            "policy_reason": policy_reason,
+                            "pre_policy_action": str(pre_policy_signal.get("action") or "HOLD").upper(),
+                            "pre_policy_stance": str(pre_policy_signal.get("stance") or "HOLD").upper(),
                         }
                     )
                     logging.info(
@@ -2856,8 +2927,32 @@ def main() -> None:
                             else:
                                 scale_in_allowed, scale_in_reason = position_manager.can_scale_in(position, last_price)
                                 if not scale_in_allowed:
-                                    execution_note = f"blocked:scale_in:{scale_in_reason}"
+                                    if scale_in_reason == "scale_in_only_on_pullback":
+                                        pullback_threshold = max(1, int(getattr(settings, "scale_in_pullback_override_streak", 4) or 4))
+                                        pullback_count, pullback_override = record_scale_in_pullback_count(
+                                            bot_state_repo,
+                                            symbol,
+                                            pullback_threshold,
+                                        )
+                                        if pullback_override:
+                                            scale_in_allowed = True
+                                            logging.info(
+                                                "[SCALE PULLBACK OVERRIDE] %s count=%d threshold=%d last_price=%.6f avg=%.6f",
+                                                symbol,
+                                                pullback_count,
+                                                pullback_threshold,
+                                                float(last_price),
+                                                float((position or {}).get("avg_entry_price") or 0.0),
+                                            )
+                                        else:
+                                            execution_note = f"blocked:scale_in:{scale_in_reason}({pullback_count}/{pullback_threshold})"
+                                    else:
+                                        reset_scale_in_pullback_count(bot_state_repo, symbol)
+                                        execution_note = f"blocked:scale_in:{scale_in_reason}"
                                 else:
+                                    reset_scale_in_pullback_count(bot_state_repo, symbol)
+
+                                if scale_in_allowed:
                                     trigger = settings.strong_scale_in_trigger_streak if action == "STRONG_BUY" else settings.scale_in_trigger_streak
                                     if streak < trigger:
                                         execution_note = f"blocked:scale_in_wait_streak({streak}/{trigger})"
@@ -2963,6 +3058,7 @@ def main() -> None:
                                                             {"count": _scale_count, "updated_at_ms": int(time.time() * 1000)},
                                                             int(time.time() * 1000),
                                                         )
+                                                        reset_scale_in_pullback_count(bot_state_repo, symbol)
                                                         # DRY-RUN SIMULATION: scale-in fill + position güncelle.
                                                         if settings.dry_run and order_result.get("dry_run"):
                                                             _dry_qty = quote_amount / last_price if last_price > 0 else 0.0
@@ -3025,6 +3121,7 @@ def main() -> None:
                                         )
                                         # PARTIAL_CLOSE veya FULL_CLOSE başarılıysa scale_in_count sıfırla.
                                         bot_state_repo.delete(f"scale_in_count:{symbol}")
+                                        bot_state_repo.delete(f"scale_in_pullback_count:{symbol}")
                                         # DRY-RUN SIMULATION: sell fill + position güncelle.
                                         # dry_run modunda exchange order gönderilmez ama fill yazılmazsa
                                         # reconciler pozisyonu kapalı göremez → bir sonraki cycle tekrar sat sinyali.
@@ -3058,6 +3155,9 @@ def main() -> None:
                             execution_note = "blocked:no_position"
                     else:
                         execution_note = "hold"
+
+                    if not (has_position and action in {"BUY", "STRONG_BUY"}):
+                        reset_scale_in_pullback_count(bot_state_repo, symbol)
 
                     if not trading_control["panic_mode"]:
                         if execution_note.startswith("exit_sent:"):
@@ -3151,6 +3251,9 @@ def main() -> None:
                     tpsl_decision = decision["tpsl_decision"]
                     tpsl_note = str(decision["tpsl_note"])
                     rumor = decision["rumor"]
+                    policy_reason = str(decision.get("policy_reason") or "policy_ok")
+                    pre_policy_action = str(decision.get("pre_policy_action") or action).upper()
+                    pre_policy_stance = str(decision.get("pre_policy_stance") or stance).upper()
 
                     order_result = None
                     execution_note = "no_order"
@@ -3268,8 +3371,32 @@ def main() -> None:
                             else:
                                 scale_in_allowed, scale_in_reason = position_manager.can_scale_in(position, last_price)
                                 if not scale_in_allowed:
-                                    execution_note = f"blocked:scale_in:{scale_in_reason}"
+                                    if scale_in_reason == "scale_in_only_on_pullback":
+                                        pullback_threshold = max(1, int(getattr(settings, "scale_in_pullback_override_streak", 4) or 4))
+                                        pullback_count, pullback_override = record_scale_in_pullback_count(
+                                            bot_state_repo,
+                                            symbol,
+                                            pullback_threshold,
+                                        )
+                                        if pullback_override:
+                                            scale_in_allowed = True
+                                            logging.info(
+                                                "[SCALE PULLBACK OVERRIDE] %s count=%d threshold=%d last_price=%.6f avg=%.6f",
+                                                symbol,
+                                                pullback_count,
+                                                pullback_threshold,
+                                                float(last_price),
+                                                float((position or {}).get("avg_entry_price") or 0.0),
+                                            )
+                                        else:
+                                            execution_note = f"blocked:scale_in:{scale_in_reason}({pullback_count}/{pullback_threshold})"
+                                    else:
+                                        reset_scale_in_pullback_count(bot_state_repo, symbol)
+                                        execution_note = f"blocked:scale_in:{scale_in_reason}"
                                 else:
+                                    reset_scale_in_pullback_count(bot_state_repo, symbol)
+
+                                if scale_in_allowed:
                                     trigger = settings.strong_scale_in_trigger_streak if action == "STRONG_BUY" else settings.scale_in_trigger_streak
                                     if streak < trigger:
                                         execution_note = f"blocked:scale_in_wait_streak({streak}/{trigger})"
@@ -3360,6 +3487,7 @@ def main() -> None:
                                                             {"count": _scale_count, "updated_at_ms": int(time.time() * 1000)},
                                                             int(time.time() * 1000),
                                                         )
+                                                        reset_scale_in_pullback_count(bot_state_repo, symbol)
                                                         if settings.dry_run and order_result.get("dry_run"):
                                                             _dry_qty = quote_amount / last_price if last_price > 0 else 0.0
                                                             _dry_trade_id = f"dry_{order_result.get('client_order_id', '')}"
@@ -3420,6 +3548,7 @@ def main() -> None:
                                             int(time.time() * 1000),
                                         )
                                         bot_state_repo.delete(f"scale_in_count:{symbol}")
+                                        bot_state_repo.delete(f"scale_in_pullback_count:{symbol}")
                                         if settings.dry_run and order_result.get("dry_run"):
                                             _dry_trade_id = f"dry_{order_result.get('client_order_id', '')}"
                                             _dry_avg = float((position or {}).get("avg_entry_price") or last_price)
@@ -3450,6 +3579,9 @@ def main() -> None:
                             execution_note = "blocked:no_position"
                     else:
                         execution_note = "hold"
+
+                    if not (has_position and action in {"BUY", "STRONG_BUY"}):
+                        reset_scale_in_pullback_count(bot_state_repo, symbol)
 
                     if not trading_control["panic_mode"]:
                         if execution_note.startswith("exit_sent:"):
@@ -3498,10 +3630,13 @@ def main() -> None:
                     trend_bias_text = ""
                     if str(regime).upper() == "TREND":
                         trend_bias_text = f" | trend_bias={decision.get('trend_bias') or 'N/A'}"
+                    policy_text = ""
+                    if policy_reason.startswith(("policy_block", "policy_full_close")):
+                        policy_text = f" | policy={pre_policy_action}/{pre_policy_stance}->{action}/{stance}:{policy_reason}"
 
                     log_line = (
                         f"{symbol}{ai_text} | profile={effective_profile}:{profile_reason} | regime={regime}{trend_bias_text} | total={total_score:.2f} | action={action} | stance={stance} | streak={streak} "
-                        f"| thresholds={thresholds_text} | position={pos_text} | tpsl={tpsl_note} | exec={order_text}{groq_text}"
+                        f"| thresholds={thresholds_text} | position={pos_text} | tpsl={tpsl_note} | exec={order_text}{policy_text}{groq_text}"
                     )
                     symbol_lines.append(log_line)
                     logging.info(log_line)

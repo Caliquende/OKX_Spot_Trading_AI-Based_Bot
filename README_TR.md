@@ -138,6 +138,12 @@ Bu nedenle Telegram erişimini yalnızca alert kanalı gibi değil, operasyonel 
 python main.py
 ```
 
+Windows'ta aynı ana bot repo kökünden şu dosyayla başlatılabilir:
+
+```powershell
+.\start_bot.bat
+```
+
 Ana akış kabaca şöyledir:
 
 1. Ayarları yükler.
@@ -180,6 +186,32 @@ python desktop_app.py --db trading_bot.db
 ```
 
 Masaüstü uygulama doğrudan emir göndermez; `bot_state` içine kontrol bayrakları yazar. `docs/desktop_app.md` dosyasına göre force refresh, pause trading ve panic mode gibi operasyonel kontroller bu kanal üzerinden yürütülür.
+
+### Windows otomatik başlatma
+
+Windows başlangıç otomasyonu için `start_bot.bat` kullanılır. Önce elle test et:
+
+```powershell
+.\start_bot.bat
+```
+
+Geçerli kullanıcı oturum açtığında botu başlatacak bir Task Scheduler görevi oluşturmak için PowerShell'i repo kökünde çalıştır:
+
+```powershell
+schtasks /Create /TN "OKX Spot Bot" /TR "`"$PWD\start_bot.bat`"" /SC ONLOGON /RL LIMITED /F
+```
+
+Operasyon notları:
+
+- Görev geçerli Windows kullanıcısı altında çalışır.
+- Görevi etkinleştirmeden önce `.env` hazır olmalıdır.
+- Başlangıç yolu doğrulanana kadar `DRY_RUN=1` ve `OKX_SANDBOX=1` kullan.
+- Oturum açtıktan sonra botun gerçekten başladığını `logs\bot.log` üzerinden kontrol et.
+- Görevi kaldırmak için:
+
+```powershell
+schtasks /Delete /TN "OKX Spot Bot" /F
+```
 
 ## Konfigürasyon Başlıkları
 

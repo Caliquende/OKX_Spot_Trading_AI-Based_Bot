@@ -354,6 +354,7 @@ class Settings:
     scale_in_buy_pct: float = _env_float("SCALE_IN_BUY_PCT", "0.10")
     strong_scale_in_buy_pct: float = _env_float("STRONG_SCALE_IN_BUY_PCT", "0.20")
     max_scale_in_count: int = _env_int("MAX_SCALE_IN_COUNT", "3")
+    scale_in_pullback_override_streak: int = _env_int("SCALE_IN_PULLBACK_OVERRIDE_STREAK", "4")
 
     # ---------------- SELL ----------------
     partial_sell_ratio: float = _env_float("PARTIAL_SELL_RATIO", "0.5")
