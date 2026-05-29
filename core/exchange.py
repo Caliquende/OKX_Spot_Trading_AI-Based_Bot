@@ -129,6 +129,39 @@ class OKXExchange:
         market = self.market(symbol)
         return float((market.get("limits") or {}).get("amount", {}).get("min") or 0.0)
 
+    def min_quote_amount(self, symbol: str, last_price: float = 0.0) -> float:
+        """
+        Returns the minimum quote value needed for an order when it can be inferred.
+
+        OKX spot instruments expose minSz as base currency size. For quote-based
+        market buys we still need enough quote to buy at least that base size.
+        """
+        market = self.market(symbol) or {}
+        limits = market.get("limits") or {}
+        amount_limits = limits.get("amount") or {}
+        cost_limits = limits.get("cost") or {}
+        info = market.get("info") or {}
+
+        min_quote = 0.0
+        for raw_cost in (cost_limits.get("min"), info.get("minQuoteSz")):
+            try:
+                min_quote = max(min_quote, float(raw_cost or 0.0))
+            except Exception:
+                pass
+
+        min_base = 0.0
+        for raw_amount in (amount_limits.get("min"), info.get("minSz")):
+            try:
+                min_base = max(min_base, float(raw_amount or 0.0))
+            except Exception:
+                pass
+
+        price = float(last_price or 0.0)
+        if min_base > 0 and price > 0:
+            min_quote = max(min_quote, min_base * price)
+
+        return min_quote
+
     def _asset_info_from_balance(self, asset: str, balance: dict[str, Any] | None = None) -> dict[str, Any]:
         """
         ccxt balance response exchange'e göre küçük sapmalar gösterebiliyor.

@@ -333,6 +333,8 @@ class Settings:
 
     # ---------------- ORDER LIMITS ----------------
     min_order_quote_usdt: float = _env_float("MIN_ORDER_QUOTE_USDT", "10")
+    min_trade_pct: float = _env_float("MIN_TRADE_PCT", "0.04")
+    min_trade_quote_buffer_pct: float = _env_float("MIN_TRADE_QUOTE_BUFFER_PCT", "0.02")
     min_free_usdt: float = _env_float("MIN_FREE_USDT", "25")
 
     # ---------------- POSITION LIMITS ----------------

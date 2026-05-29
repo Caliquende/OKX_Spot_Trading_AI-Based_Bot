@@ -73,6 +73,38 @@ def test_range_requires_mean_reversion_evidence():
     assert reason == "policy_block_range_without_mean_reversion"
 
 
+def test_range_allows_confirmed_upward_breakout_continuation():
+    signal = {"action": "BUY", "fraction": 0.03, "stance": "BUY"}
+
+    adjusted, reason = apply_regime_execution_policy(
+        signal=signal,
+        score=6.7,
+        regime_params={
+            "regime": "RANGE",
+            "buy_threshold": 5,
+            "strong_buy_threshold": 8,
+            "sell_threshold": -5,
+            "strong_sell_threshold": -10,
+            "buy_pct": 0.03,
+            "strong_buy_pct": 0.06,
+        },
+        regime_diag={"regime": "RANGE", "trend_bias": "UP", "adx": 26.0},
+        indicator_details={
+            "rsi": -1,
+            "stochrsi": -2,
+            "bollinger": 0,
+            "ema_trend": 2,
+            "ema_slope": 1,
+            "price_vs_ema50": 1,
+            "volume_spike": 1,
+        },
+        ai_diag={"effective": 0.5, "weak_catalyst": True},
+    )
+
+    assert adjusted == signal
+    assert reason == "policy_ok_range_breakout_continuation"
+
+
 def test_chop_allows_only_strong_score_and_reduces_size():
     adjusted, reason = apply_regime_execution_policy(
         signal={"action": "STRONG_BUY", "fraction": 0.018, "stance": "STRONG_BUY"},
