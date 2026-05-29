@@ -366,6 +366,10 @@ def select_dynamic_strategy_profile(
 
     if has_position and (ai_effective <= -3.0 or trend_bias == "DOWN"):
         return "conservative", "protect_open_position"
+
+    # Yeni pozisyon yok ve piyasa aşağı yönlü — en koruyucu profile geç
+    if not has_position and trend_bias == "DOWN":
+        return "conservative", "bearish_market_no_new_entry"
     if regime_name == "VOLATILE":
         if trend_bias == "UP" and ai_effective >= 2.0 and score >= 5.0:
             return "scalper", "volatile_up_ai_confirmed"
@@ -654,6 +658,10 @@ def _format_cycle_symbol_line(raw_line: str) -> list[str]:
         lines.append(
             f"  Risk/Exec: tpsl={_telegram_shorten(tpsl, 58)} | exec={_telegram_shorten(execution, 86)}"
         )
+
+    why = fields.get("why")
+    if why:
+        lines.append(f"  Why: {_telegram_shorten(why, 130)}")
 
     groq = fields.get("groq")
     if groq:
@@ -2523,6 +2531,22 @@ def main() -> None:
 
             ai_thresholds = bot_state_repo.get("ai_thresholds")
 
+            # === GLOBAL MARKET SENTIMENT FILTER ===
+            # Sembollerin çoğu DOWN trend'deyse tüm yeni girişleri askıya al.
+            # Bu, bear market'ta sürekli alım yapılmasını önler.
+            _down_bias_count = sum(
+                1 for sym in settings.symbols
+                if str(bot_state_repo.get(f"trend_bias_state:{sym}") or "").upper() == "DOWN"
+            )
+            _total_sym = max(len(settings.symbols), 1)
+            _global_bearish_pct = _down_bias_count / _total_sym
+            global_market_bearish = _global_bearish_pct >= 0.60  # %60 veya üzeri sembol DOWN ise piyasa bearish
+            if global_market_bearish:
+                logging.info(
+                    "[GLOBAL MARKET FILTER] %d/%d sembol DOWN trend (%d%%) — yeni girişler kısıtlanıyor",
+                    _down_bias_count, _total_sym, int(_global_bearish_pct * 100)
+                )
+
             for symbol in settings.symbols:
                 try:
                     reconcile_ok = True
@@ -2588,6 +2612,9 @@ def main() -> None:
                             # Rejim değiştiyse eski conviction'a biraz daha az güveniyoruz.
                             logging.info(f"[REGIME FLIP] {symbol} {_prev_regime} -> {regime}")
                         bot_state_repo.set(_regime_state_key, regime, int(time.time() * 1000))
+                        # Trend bias'ı da kalıcı olarak sakla — global market filter için kullanılır
+                        _trend_bias_now = str(regime_diag.get("trend_bias") or "").upper()
+                        bot_state_repo.set(f"trend_bias_state:{symbol}", _trend_bias_now, int(time.time() * 1000))
 
                         effective_profile, profile_reason = select_dynamic_strategy_profile(
                             base_profile=settings.strategy_profile,
@@ -2634,11 +2661,15 @@ def main() -> None:
                         except Exception:
                             position_pnl_pct = None
                     pre_policy_signal = dict(signal)
+                    # Global market bearish flag'i regime_diag'a ekle — policy fonksiyonu okuyabilsin
+                    _regime_diag_with_global = dict(regime_diag)
+                    if global_market_bearish:
+                        _regime_diag_with_global["global_market_bearish"] = True
                     policy_signal, policy_reason = apply_regime_execution_policy(
                         signal=signal,
                         score=total_score,
                         regime_params=regime_params,
-                        regime_diag=regime_diag,
+                        regime_diag=_regime_diag_with_global,
                         indicator_details=indicator_details,
                         ai_diag=ai_score_diag,
                         has_position=has_position,
@@ -2733,6 +2764,12 @@ def main() -> None:
                             f"[TPSL CHECK] {symbol} sl={tpsl_decision['stop_loss_price']} be={tpsl_decision.get('break_even_stop_price')} ptp={tpsl_decision['partial_take_profit_price']} ftp={tpsl_decision['full_take_profit_price']} peak={tpsl_decision.get('peak_price')} peak_pnl_pct={tpsl_decision.get('peak_pnl_pct')} retrace_pct={tpsl_decision.get('trailing_retrace_pct')} pnl_pct={tpsl_decision['pnl_pct']} reason={tpsl_decision['reason']}"
                         )
 
+                    decision_reason = f"profile:{profile_reason}"
+                    if policy_reason != "policy_ok":
+                        decision_reason = f"policy:{policy_reason}"
+                    if tpsl_decision["triggered"]:
+                        decision_reason = f"tpsl:{tpsl_decision['reason']}"
+
                     pending_trade_decisions.append(
                         {
                             "symbol": symbol,
@@ -2751,6 +2788,8 @@ def main() -> None:
                             "profile_risk_limits": profile_risk_limits,
                             "effective_profile": effective_profile,
                             "profile_reason": profile_reason,
+                            "policy_reason": policy_reason,
+                            "decision_reason": decision_reason,
                             "total_score": total_score,
                             "tpsl_decision": tpsl_decision,
                             "tpsl_note": tpsl_note,
@@ -3150,7 +3189,77 @@ def main() -> None:
                                             except Exception as _dry_exc:
                                                 logging.warning("[DRY SIM SELL ERROR] %s %s", symbol, _dry_exc)
                                     else:
-                                        execution_note = f"blocked:exit_failed:{(order_result or {}).get('reason', 'unknown')}"
+                                        _exit_fail_reason = (order_result or {}).get('reason', 'unknown')
+                                        execution_note = f"blocked:exit_failed:{_exit_fail_reason}"
+                                        # DUST FIX: amount_precision hatası = pozisyon minimum boyutun altında.
+                                        # Bu tür pozisyonlar hiçbir zaman kapatılamaz; bot her döngüde aynı hatayı tekrarlıyor.
+                                        # Pozisyonu DB'de qty=0 yaparak retry döngüsünü durdur.
+                                        if "amount_precision" in _exit_fail_reason:
+                                            # Dust < 0.05 USDT kontrolü: legitimate dust olarak bırak
+                                            pos_qty = float((position or {}).get("qty") or 0)
+                                            pos_value_usdt = pos_qty * last_price
+                                            dust_max_value = float(getattr(settings, "dust_candidate_max_value_usdt", 0.05) or 0.05)
+                                            
+                                            if pos_value_usdt <= dust_max_value:
+                                                # <= 0.05 USDT = too small to trade, use OKX easy_convert API
+                                                logging.warning(
+                                                    "[DUST CONVERT] %s qty=%.10f value=%.6f USDT <= %.2f USDT - attempting OKX easy_convert",
+                                                    symbol, pos_qty, pos_value_usdt, dust_max_value
+                                                )
+                                                try:
+                                                    base_asset = str(symbol).split("/")[0]
+                                                    
+                                                    # Dry run check: skip API call in test mode
+                                                    if settings.dry_run:
+                                                        logging.info("[DUST CONVERT SKIPPED] %s dry_run mode - not converting", symbol)
+                                                        execution_note = "dust_convert_skipped:dry_run"
+                                                    else:
+                                                        # OKX easy_convert: convert dust asset to USDT
+                                                        convert_result = exchange.easy_convert(
+                                                        from_ccy=[base_asset],
+                                                        to_ccy="USDT",
+                                                        source=str(getattr(settings, "dust_easy_convert_source", "1") or "1")
+                                                    )
+                                                    convert_code = str((convert_result or {}).get("code", ""))
+                                                    
+                                                    if convert_code == "0":
+                                                        logging.info(
+                                                            "[DUST CONVERTED] %s successfully converted to USDT via OKX easy_convert",
+                                                            symbol
+                                                        )
+                                                        # Update DB: mark position as closed
+                                                        positions_repo.upsert(
+                                                            symbol=symbol,
+                                                            base_asset=base_asset,
+                                                            quote_asset="USDT",
+                                                            qty=0.0,
+                                                            avg_entry_price=0.0,
+                                                            realized_pnl_quote=float((position or {}).get("realized_pnl_quote") or 0.0),
+                                                            fees_quote=0.0,
+                                                            status="CLOSED",
+                                                            now_ms=int(time.time() * 1000),
+                                                        )
+                                                        # Sync position from exchange
+                                                        try:
+                                                            reconciler.sync_symbol(symbol)
+                                                        except Exception as _sync_exc:
+                                                            logging.warning("[DUST RECON FAIL] %s err=%s", symbol, _sync_exc)
+                                                        execution_note = "dust_converted:okx_easy_convert"
+                                                    else:
+                                                        logging.warning(
+                                                            "[DUST CONVERT FAILED] %s code=%s result=%s",
+                                                            symbol, convert_code, convert_result
+                                                        )
+                                                        execution_note = f"dust_convert_failed:code_{convert_code}"
+                                                except Exception as _dust_exc:
+                                                    logging.warning("[DUST CONVERT ERROR] %s %s", symbol, _dust_exc)
+                                                    execution_note = f"dust_convert_error:{str(_dust_exc)[:50]}"
+                                            else:
+                                                # > 0.05 USDT = preserve position, retry next cycle
+                                                logging.info(
+                                                    "[DUST PRESERVED] %s qty=%.10f value=%.6f USDT > %.2f USDT - keeping position for retry",
+                                                    symbol, pos_qty, pos_value_usdt, dust_max_value
+                                                )
                         else:
                             execution_note = "blocked:no_position"
                     else:
@@ -3247,6 +3356,7 @@ def main() -> None:
                     profile_risk_limits = decision["profile_risk_limits"]
                     effective_profile = str(decision["effective_profile"])
                     profile_reason = str(decision["profile_reason"])
+                    decision_reason = str(decision.get("decision_reason") or f"profile:{profile_reason}")
                     total_score = float(decision["total_score"])
                     tpsl_decision = decision["tpsl_decision"]
                     tpsl_note = str(decision["tpsl_note"])
@@ -3574,7 +3684,77 @@ def main() -> None:
                                             except Exception as _dry_exc:
                                                 logging.warning("[DRY SIM SELL ERROR] %s %s", symbol, _dry_exc)
                                     else:
-                                        execution_note = f"blocked:exit_failed:{(order_result or {}).get('reason', 'unknown')}"
+                                        _exit_fail_reason = (order_result or {}).get('reason', 'unknown')
+                                        execution_note = f"blocked:exit_failed:{_exit_fail_reason}"
+                                        # DUST FIX: amount_precision hatası = pozisyon minimum boyutun altında.
+                                        # Bu tür pozisyonlar hiçbir zaman kapatılamaz; bot her döngüde aynı hatayı tekrarlıyor.
+                                        # Pozisyonu DB'de qty=0 yaparak retry döngüsünü durdur.
+                                        if "amount_precision" in _exit_fail_reason:
+                                            # Dust < 0.05 USDT kontrolü: legitimate dust olarak bırak
+                                            pos_qty = float((position or {}).get("qty") or 0)
+                                            pos_value_usdt = pos_qty * last_price
+                                            dust_max_value = float(getattr(settings, "dust_candidate_max_value_usdt", 0.05) or 0.05)
+                                            
+                                            if pos_value_usdt <= dust_max_value:
+                                                # <= 0.05 USDT = too small to trade, use OKX easy_convert API
+                                                logging.warning(
+                                                    "[DUST CONVERT] %s qty=%.10f value=%.6f USDT <= %.2f USDT - attempting OKX easy_convert",
+                                                    symbol, pos_qty, pos_value_usdt, dust_max_value
+                                                )
+                                                try:
+                                                    base_asset = str(symbol).split("/")[0]
+                                                    
+                                                    # Dry run check: skip API call in test mode
+                                                    if settings.dry_run:
+                                                        logging.info("[DUST CONVERT SKIPPED] %s dry_run mode - not converting", symbol)
+                                                        execution_note = "dust_convert_skipped:dry_run"
+                                                    else:
+                                                        # OKX easy_convert: convert dust asset to USDT
+                                                        convert_result = exchange.easy_convert(
+                                                        from_ccy=[base_asset],
+                                                        to_ccy="USDT",
+                                                        source=str(getattr(settings, "dust_easy_convert_source", "1") or "1")
+                                                    )
+                                                    convert_code = str((convert_result or {}).get("code", ""))
+                                                    
+                                                    if convert_code == "0":
+                                                        logging.info(
+                                                            "[DUST CONVERTED] %s successfully converted to USDT via OKX easy_convert",
+                                                            symbol
+                                                        )
+                                                        # Update DB: mark position as closed
+                                                        positions_repo.upsert(
+                                                            symbol=symbol,
+                                                            base_asset=base_asset,
+                                                            quote_asset="USDT",
+                                                            qty=0.0,
+                                                            avg_entry_price=0.0,
+                                                            realized_pnl_quote=float((position or {}).get("realized_pnl_quote") or 0.0),
+                                                            fees_quote=0.0,
+                                                            status="CLOSED",
+                                                            now_ms=int(time.time() * 1000),
+                                                        )
+                                                        # Sync position from exchange
+                                                        try:
+                                                            reconciler.sync_symbol(symbol)
+                                                        except Exception as _sync_exc:
+                                                            logging.warning("[DUST RECON FAIL] %s err=%s", symbol, _sync_exc)
+                                                        execution_note = "dust_converted:okx_easy_convert"
+                                                    else:
+                                                        logging.warning(
+                                                            "[DUST CONVERT FAILED] %s code=%s result=%s",
+                                                            symbol, convert_code, convert_result
+                                                        )
+                                                        execution_note = f"dust_convert_failed:code_{convert_code}"
+                                                except Exception as _dust_exc:
+                                                    logging.warning("[DUST CONVERT ERROR] %s %s", symbol, _dust_exc)
+                                                    execution_note = f"dust_convert_error:{str(_dust_exc)[:50]}"
+                                            else:
+                                                # > 0.05 USDT = preserve position, retry next cycle
+                                                logging.info(
+                                                    "[DUST PRESERVED] %s qty=%.10f value=%.6f USDT > %.2f USDT - keeping position for retry",
+                                                    symbol, pos_qty, pos_value_usdt, dust_max_value
+                                                )
                         else:
                             execution_note = "blocked:no_position"
                     else:
@@ -3636,7 +3816,7 @@ def main() -> None:
 
                     log_line = (
                         f"{symbol}{ai_text} | profile={effective_profile}:{profile_reason} | regime={regime}{trend_bias_text} | total={total_score:.2f} | action={action} | stance={stance} | streak={streak} "
-                        f"| thresholds={thresholds_text} | position={pos_text} | tpsl={tpsl_note} | exec={order_text}{policy_text}{groq_text}"
+                        f"| thresholds={thresholds_text} | position={pos_text} | tpsl={tpsl_note} | exec={order_text}{policy_text} | why={decision_reason}{groq_text}"
                     )
                     symbol_lines.append(log_line)
                     logging.info(log_line)
@@ -3681,7 +3861,7 @@ def main() -> None:
                             f"| regime={err_regime}{err_trend_bias_text} | total={float(decision.get('total_score') or 0.0):.2f} "
                             f"| action={str(decision.get('action') or 'N/A').upper()} | stance={str(decision.get('stance') or 'N/A').upper()} "
                             f"| streak={decision.get('streak')} | thresholds={thresholds_text} | position={pos_text} | tpsl={decision.get('tpsl_note')} "
-                            f"| exec=blocked:execution_error:{err_text}{groq_text}"
+                            f"| exec=blocked:execution_error:{err_text} | why={decision.get('decision_reason') or 'execution_error'}{groq_text}"
                         )
                     except Exception:
                         err_line = f"{symbol} | ERROR | execution_error:{err_text}"
