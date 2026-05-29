@@ -365,6 +365,8 @@ def parse_new_cycle_symbols(summary: str) -> list[dict[str, str]]:
             current["position"] = stripped.replace("Position:", "", 1).strip()
         elif stripped.startswith("Risk/Exec:"):
             current["exec"] = stripped.replace("Risk/Exec:", "", 1).strip()
+        elif stripped.startswith("Why:"):
+            current["why"] = stripped.replace("Why:", "", 1).strip()
         elif stripped.startswith("Groq:"):
             current["groq"] = stripped.replace("Groq:", "", 1).strip()
     if current:
@@ -681,8 +683,8 @@ class BotDesktopApp(tk.Tk):
         if not rows:
             ttk.Label(self.overview_left, text="Henüz parse edilebilir cycle kararı yok.", style="PanelMuted.TLabel").pack(anchor="w", pady=12)
         else:
-            columns = ("symbol", "action", "total", "regime", "exec", "groq")
-            tree = self._make_tree(self.overview_left, columns, ("Symbol", "Action", "Total", "Regime", "Exec", "Groq"))
+            columns = ("symbol", "action", "total", "regime", "why", "exec", "groq")
+            tree = self._make_tree(self.overview_left, columns, ("Symbol", "Action", "Total", "Regime", "Why", "Exec", "Groq"))
             for row in rows[:12]:
                 tree.insert(
                     "",
@@ -692,6 +694,7 @@ class BotDesktopApp(tk.Tk):
                         row.get("action", "-"),
                         row.get("total", "-"),
                         row.get("regime", "-"),
+                        short_text(row.get("why", "-"), 60),
                         short_text(row.get("exec", "-"), 70),
                         short_text(row.get("groq", "-"), 80),
                     ),
@@ -739,8 +742,8 @@ class BotDesktopApp(tk.Tk):
         frame = self._panel(self.content, 0, 0, "Signals", "AI skor, teknik skor ve final aksiyonun denetim ekranı.")
         self.signals_tree = self._make_tree(
             frame,
-            ("symbol", "action", "stance", "total", "regime", "streak", "exec", "groq"),
-            ("Symbol", "Action", "Stance", "Total", "Regime", "Streak", "Exec", "Groq"),
+            ("symbol", "action", "stance", "total", "regime", "streak", "why", "exec", "groq"),
+            ("Symbol", "Action", "Stance", "Total", "Regime", "Streak", "Why", "Exec", "Groq"),
         )
 
     def _render_signals(self) -> None:
@@ -758,6 +761,7 @@ class BotDesktopApp(tk.Tk):
                     row.get("total", "-"),
                     row.get("regime", "-"),
                     row.get("streak", "-"),
+                    short_text(row.get("why", "-"), 70),
                     short_text(row.get("exec", "-"), 90),
                     short_text(row.get("groq", "-"), 110),
                 ),
