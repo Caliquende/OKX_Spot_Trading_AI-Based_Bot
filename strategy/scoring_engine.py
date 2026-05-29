@@ -251,13 +251,6 @@ def apply_regime_execution_policy(
     if not has_position and action in {"PARTIAL_CLOSE", "FULL_CLOSE"}:
         return hold("policy_block_exit_without_position")
 
-    # === GLOBAL TREND FILTER ===
-    # Düşen piyasada (trend_bias=DOWN) yeni uzun pozisyon açma.
-    # En önemli koruma: düşen trendde alım yapmak kayıpların ana sebebi.
-    # Bu kural hem yeni girişler hem de scale-in için geçerlidir.
-    if action in {"BUY", "STRONG_BUY"} and trend_bias == "DOWN":
-        return hold("policy_block_down_bias_no_long_entry")
-
     # === GLOBAL MARKET BEARISH FILTER ===
     # Sembollerin çoğu bearish'se yeni giriş yapma
     if action in {"BUY", "STRONG_BUY"} and global_market_bearish and not has_position:
@@ -271,9 +264,7 @@ def apply_regime_execution_policy(
             return promote_full_close(f"policy_full_close_loser_{regime.lower()}")
         if pnl <= -0.015 and trend_bias == "DOWN":
             return promote_full_close("policy_full_close_loser_down_bias")
-        # Küçük dip'lerde hemen kapatma — pozisyona nefes aldır (%1.5 eşik)
-        # Önceden pnl <= 0 idi, bu yüzden her küçük salınımda kayıp realize ediliyordu
-        if pnl <= -0.015:
+        if pnl < 0:
             return promote_full_close("policy_full_close_loser")
 
     if has_position and action == "PARTIAL_CLOSE" and regime == "VOLATILE" and trend_bias == "DOWN":
@@ -292,12 +283,12 @@ def apply_regime_execution_policy(
     # RANGE: mean-reversion trade. Dip/alt bant kanıtı yoksa kovalamayı engelle.
     # DOWN trend'de range mean-reversion çalışmaz — fiyat düşmeye devam eder.
     if regime == "RANGE":
-        # DOWN trending range'de asla alım yapma (global filtre zaten engeller ama çift güvence)
-        if trend_bias == "DOWN" and action in {"BUY", "STRONG_BUY"}:
-            return hold("policy_block_range_down_trend_no_buy")
         mean_reversion_evidence = rsi_signal > 0 or stoch_signal > 0 or bollinger_signal > 0
         if not mean_reversion_evidence:
             return hold("policy_block_range_without_mean_reversion")
+        # DOWN trending range'de asla alım yapma (çift güvence)
+        if trend_bias == "DOWN" and action in {"BUY", "STRONG_BUY"}:
+            return hold("policy_block_range_down_trend_no_buy")
         if weak_catalyst and effective_ai_score < 0 and score < strong_buy_threshold:
             return hold("policy_block_range_weak_negative_ai")
         return adjusted, "policy_ok_range"
@@ -325,9 +316,6 @@ def apply_regime_execution_policy(
 
     # VOLATILE: breakout/continuation şartı. Düşen volatilitede dip yakalama kapalı.
     if regime == "VOLATILE":
-        # DOWN trend'de volatile piyasada asla alım yapma — en tehlikeli kombinasyon
-        if trend_bias == "DOWN" and action in {"BUY", "STRONG_BUY"}:
-            return hold("policy_block_volatile_down_trend")
         trend_confirmation = (
             trend_bias == "UP"
             and ema_trend_signal > 0
@@ -338,6 +326,9 @@ def apply_regime_execution_policy(
         strong_reversal = action == "STRONG_BUY" and score >= strong_buy_threshold and effective_ai_score > 0
         if not trend_confirmation and not strong_reversal:
             return hold("policy_block_volatile_without_breakout_confirmation")
+        # DOWN trend'de volatile piyasada asla alım yapma — en tehlikeli kombinasyon
+        if trend_bias == "DOWN" and action in {"BUY", "STRONG_BUY"}:
+            return hold("policy_block_volatile_down_trend")
         adjusted["fraction"] = min(float(adjusted.get("fraction") or 0.0), float(params["buy_pct"]))
         return adjusted, "policy_ok_volatile_reduced_size"
 
