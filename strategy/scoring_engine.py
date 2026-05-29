@@ -230,6 +230,7 @@ def apply_regime_execution_policy(
     weak_catalyst = bool(ai_diag.get("weak_catalyst"))
     buy_threshold = float(params["buy_threshold"])
     strong_buy_threshold = float(params["strong_buy_threshold"])
+    global_market_bearish = bool(regime_diag.get("global_market_bearish", False))
 
     rsi_signal = float(indicator_details.get("rsi") or 0.0)
     stoch_signal = float(indicator_details.get("stochrsi") or 0.0)
@@ -250,15 +251,29 @@ def apply_regime_execution_policy(
     if not has_position and action in {"PARTIAL_CLOSE", "FULL_CLOSE"}:
         return hold("policy_block_exit_without_position")
 
+    # === GLOBAL TREND FILTER ===
+    # Düşen piyasada (trend_bias=DOWN) yeni uzun pozisyon açma.
+    # En önemli koruma: düşen trendde alım yapmak kayıpların ana sebebi.
+    # Bu kural hem yeni girişler hem de scale-in için geçerlidir.
+    if action in {"BUY", "STRONG_BUY"} and trend_bias == "DOWN":
+        return hold("policy_block_down_bias_no_long_entry")
+
+    # === GLOBAL MARKET BEARISH FILTER ===
+    # Sembollerin çoğu bearish'se yeni giriş yapma
+    if action in {"BUY", "STRONG_BUY"} and global_market_bearish and not has_position:
+        return hold("policy_block_global_market_bearish")
+
     # Zarar büyüdüğünde kademeli çıkış yerine tam risk azaltma.
     # Eski loglarda ana zarar indicator_partial_close zincirinden geldi.
     if has_position and action == "PARTIAL_CLOSE" and position_pnl_pct is not None:
         pnl = float(position_pnl_pct)
-        if pnl <= -0.025 and regime in {"CHOP", "VOLATILE"}:
+        if pnl <= -0.02 and regime in {"CHOP", "VOLATILE"}:
             return promote_full_close(f"policy_full_close_loser_{regime.lower()}")
-        if pnl <= -0.018 and trend_bias == "DOWN":
+        if pnl <= -0.015 and trend_bias == "DOWN":
             return promote_full_close("policy_full_close_loser_down_bias")
-        if pnl <= 0:
+        # Küçük dip'lerde hemen kapatma — pozisyona nefes aldır (%1.5 eşik)
+        # Önceden pnl <= 0 idi, bu yüzden her küçük salınımda kayıp realize ediliyordu
+        if pnl <= -0.015:
             return promote_full_close("policy_full_close_loser")
 
     if has_position and action == "PARTIAL_CLOSE" and regime == "VOLATILE" and trend_bias == "DOWN":
@@ -275,7 +290,11 @@ def apply_regime_execution_policy(
         return adjusted, "policy_ok_trend"
 
     # RANGE: mean-reversion trade. Dip/alt bant kanıtı yoksa kovalamayı engelle.
+    # DOWN trend'de range mean-reversion çalışmaz — fiyat düşmeye devam eder.
     if regime == "RANGE":
+        # DOWN trending range'de asla alım yapma (global filtre zaten engeller ama çift güvence)
+        if trend_bias == "DOWN" and action in {"BUY", "STRONG_BUY"}:
+            return hold("policy_block_range_down_trend_no_buy")
         mean_reversion_evidence = rsi_signal > 0 or stoch_signal > 0 or bollinger_signal > 0
         if not mean_reversion_evidence:
             return hold("policy_block_range_without_mean_reversion")
@@ -306,6 +325,9 @@ def apply_regime_execution_policy(
 
     # VOLATILE: breakout/continuation şartı. Düşen volatilitede dip yakalama kapalı.
     if regime == "VOLATILE":
+        # DOWN trend'de volatile piyasada asla alım yapma — en tehlikeli kombinasyon
+        if trend_bias == "DOWN" and action in {"BUY", "STRONG_BUY"}:
+            return hold("policy_block_volatile_down_trend")
         trend_confirmation = (
             trend_bias == "UP"
             and ema_trend_signal > 0
