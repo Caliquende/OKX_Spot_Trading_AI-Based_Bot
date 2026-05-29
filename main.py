@@ -569,6 +569,9 @@ def _telegram_policy_explanation(reason: object) -> str:
         "policy_block_range_weak_negative_ai": (
             "RANGE regime had weak or negative AI influence, and the score did not reach strong-buy confirmation."
         ),
+        "policy_ok_range_breakout_continuation": (
+            "RANGE regime had strong upward breakout confirmation, so the bot allowed continuation instead of waiting for a pullback."
+        ),
         "policy_block_trend_down_without_strong_reversal": (
             "Trend bias was down; buys are allowed only with strong reversal confirmation."
         ),
@@ -1047,6 +1050,43 @@ def compute_position_value(position: dict | None, last_price: float) -> float:
     if qty <= 0 or last_price <= 0:
         return 0.0
     return qty * last_price
+
+
+def resolve_min_trade_quote(
+    exchange: OKXExchange,
+    symbol: str,
+    last_price: float,
+    portfolio: dict | None,
+    base_settings=settings,
+) -> float:
+    """
+    Resolve the practical minimum order quote for a symbol.
+
+    The floor is the largest of the configured absolute minimum, configured
+    portfolio percentage floor, and exchange symbol minimum.
+    """
+    floors = [max(0.0, float(getattr(base_settings, "min_order_quote_usdt", 0.0) or 0.0))]
+
+    total_balance = 0.0
+    if portfolio:
+        try:
+            total_balance = float(portfolio.get("total_balance") or 0.0)
+        except Exception:
+            total_balance = 0.0
+
+    min_trade_pct = max(0.0, float(getattr(base_settings, "min_trade_pct", 0.0) or 0.0))
+    if total_balance > 0 and min_trade_pct > 0:
+        floors.append(total_balance * min_trade_pct)
+
+    try:
+        exchange_floor = float(exchange.min_quote_amount(symbol, float(last_price or 0.0)) or 0.0)
+        if exchange_floor > 0:
+            floors.append(exchange_floor)
+    except Exception as exc:
+        logging.warning("[MIN TRADE FLOOR WARN] %s err=%s", symbol, exc)
+
+    buffer_pct = max(0.0, float(getattr(base_settings, "min_trade_quote_buffer_pct", 0.0) or 0.0))
+    return max(floors) * (1.0 + buffer_pct)
 
 
 def get_free_base_qty(exchange: OKXExchange, symbol: str) -> float:
@@ -2694,10 +2734,17 @@ def main() -> None:
                     fraction = float(signal["fraction"])
                     stance = str(signal["stance"]).upper()
                     profile_values = get_strategy_profile_values(effective_profile)
+                    min_trade_pct_floor = max(0.0, float(getattr(settings, "min_trade_pct", 0.0) or 0.0))
                     profile_risk_limits = {
-                        "max_symbol_exposure_pct": float(profile_values.get("max_symbol_exposure_pct", settings.max_symbol_exposure_pct)),
+                        "max_symbol_exposure_pct": max(
+                            float(profile_values.get("max_symbol_exposure_pct", settings.max_symbol_exposure_pct)),
+                            min_trade_pct_floor,
+                        ),
                         "max_total_exposure_pct": float(profile_values.get("max_total_exposure_pct", settings.max_total_exposure_pct)),
-                        "max_single_trade_pct": float(profile_values.get("max_single_trade_pct", settings.max_single_trade_pct)),
+                        "max_single_trade_pct": max(
+                            float(profile_values.get("max_single_trade_pct", settings.max_single_trade_pct)),
+                            min_trade_pct_floor,
+                        ),
                     }
 
                     # P0.1.1:
@@ -3379,19 +3426,21 @@ def main() -> None:
                             elif float(cycle_free_usdt) < settings.min_free_usdt:
                                 execution_note = "blocked:low_cash"
                             else:
-                                desired_quote = float(portfolio["total_balance"]) * fraction
+                                min_trade_quote = resolve_min_trade_quote(exchange, symbol, last_price, portfolio, settings)
+                                desired_quote = max(float(portfolio["total_balance"]) * fraction, min_trade_quote)
                                 max_cash_usable = max(0.0, float(cycle_free_usdt) - settings.min_free_usdt)
                                 quote_amount = min(desired_quote, max_cash_usable)
                                 logging.info(
-                                    "[ENTRY BUDGET] %s desired_quote=%.4f cycle_free_usdt=%.4f max_cash_usable=%.4f quote_amount=%.4f",
+                                    "[ENTRY BUDGET] %s desired_quote=%.4f min_trade_quote=%.4f cycle_free_usdt=%.4f max_cash_usable=%.4f quote_amount=%.4f",
                                     symbol,
                                     desired_quote,
+                                    min_trade_quote,
                                     float(cycle_free_usdt),
                                     max_cash_usable,
                                     quote_amount,
                                 )
 
-                                if quote_amount >= settings.min_order_quote_usdt:
+                                if quote_amount >= min_trade_quote:
                                     risk_portfolio = dict(portfolio)
                                     risk_portfolio["cash_balance"] = float(cycle_free_usdt)
                                     total_balance_for_risk = float(risk_portfolio.get("total_balance") or 0.0)
@@ -3400,13 +3449,15 @@ def main() -> None:
                                         if total_balance_for_risk > 0
                                         else 0.0
                                     )
+                                    risk_limits = dict(profile_risk_limits)
+                                    risk_limits["min_order_quote_usdt"] = min_trade_quote
                                     allowed, risk_quote_amount, risk_reason = risk_engine.check_entry(
                                         symbol=symbol,
                                         portfolio=risk_portfolio,
                                         position=position,
                                         desired_quote=quote_amount,
                                         last_price=last_price,
-                                        risk_limits=profile_risk_limits,
+                                        risk_limits=risk_limits,
                                     )
                                     if not allowed:
                                         execution_note = f"blocked:risk:{risk_reason}"
@@ -3431,12 +3482,22 @@ def main() -> None:
                                                 risk_reason,
                                             )
                                         quote_amount = float(risk_quote_amount)
-                                        order_result = execution.place_entry(
-                                            symbol=symbol,
-                                            quote_amount=quote_amount,
-                                            reason=f"initial_entry regime={regime} action={action} score={total_score} streak={streak}",
-                                            intent="initial_entry",
-                                        )
+                                        if quote_amount < min_trade_quote:
+                                            execution_note = "blocked:risk:too_small_after_min_trade"
+                                            logging.info(
+                                                "[RISK ENTRY] %s adjusted_quote=%.4f min_trade_quote=%.4f reason=too_small_after_min_trade",
+                                                symbol,
+                                                quote_amount,
+                                                min_trade_quote,
+                                            )
+                                            order_result = None
+                                        else:
+                                            order_result = execution.place_entry(
+                                                symbol=symbol,
+                                                quote_amount=quote_amount,
+                                                reason=f"initial_entry regime={regime} action={action} score={total_score} streak={streak}",
+                                                intent="initial_entry",
+                                            )
                                         if order_result and order_result.get("ok"):
                                             cycle_free_usdt = max(0.0, float(cycle_free_usdt) - float(quote_amount))
                                             execution_note = f"initial_entry_sent:{action.lower()}"
@@ -3470,9 +3531,10 @@ def main() -> None:
                                                 except Exception as _dry_exc:
                                                     logging.warning("[DRY SIM BUY ERROR] %s %s", symbol, _dry_exc)
                                         else:
-                                            execution_note = f"blocked:entry_failed:{(order_result or {}).get('reason', 'unknown')}"
+                                            if execution_note == "no_order":
+                                                execution_note = f"blocked:entry_failed:{(order_result or {}).get('reason', 'unknown')}"
                                 else:
-                                    execution_note = "blocked:too_small"
+                                    execution_note = f"blocked:too_small_min_trade({quote_amount:.4f}/{min_trade_quote:.4f})"
                         else:
                             if not settings.scale_in_enabled:
                                 execution_note = "blocked:already_in_position"
@@ -3522,21 +3584,23 @@ def main() -> None:
                                             position_value = compute_position_value(position, last_price)
                                             total_balance = max(float(portfolio["total_balance"]), 1e-12)
                                             scale_fraction = settings.strong_scale_in_buy_pct if action == "STRONG_BUY" else settings.scale_in_buy_pct
-                                            desired_quote = total_balance * scale_fraction
+                                            min_trade_quote = resolve_min_trade_quote(exchange, symbol, last_price, portfolio, settings)
+                                            desired_quote = max(total_balance * scale_fraction, min_trade_quote)
                                             exposure_cap_quote = max(0.0, total_balance * profile_risk_limits["max_symbol_exposure_pct"] - position_value)
                                             cash_cap_quote = max(0.0, float(cycle_free_usdt) - settings.min_free_usdt)
                                             quote_amount = min(desired_quote, exposure_cap_quote, cash_cap_quote)
                                             logging.info(
-                                                "[SCALE BUDGET] %s desired_quote=%.4f exposure_cap_quote=%.4f cycle_free_usdt=%.4f cash_cap_quote=%.4f quote_amount=%.4f",
+                                                "[SCALE BUDGET] %s desired_quote=%.4f min_trade_quote=%.4f exposure_cap_quote=%.4f cycle_free_usdt=%.4f cash_cap_quote=%.4f quote_amount=%.4f",
                                                 symbol,
                                                 desired_quote,
+                                                min_trade_quote,
                                                 exposure_cap_quote,
                                                 float(cycle_free_usdt),
                                                 cash_cap_quote,
                                                 quote_amount,
                                             )
 
-                                            if quote_amount >= settings.min_order_quote_usdt:
+                                            if quote_amount >= min_trade_quote:
                                                 risk_portfolio = dict(portfolio)
                                                 risk_portfolio["cash_balance"] = float(cycle_free_usdt)
                                                 total_balance_for_risk = float(risk_portfolio.get("total_balance") or 0.0)
@@ -3545,13 +3609,15 @@ def main() -> None:
                                                     if total_balance_for_risk > 0
                                                     else 0.0
                                                 )
+                                                risk_limits = dict(profile_risk_limits)
+                                                risk_limits["min_order_quote_usdt"] = min_trade_quote
                                                 allowed, risk_quote_amount, risk_reason = risk_engine.check_entry(
                                                     symbol=symbol,
                                                     portfolio=risk_portfolio,
                                                     position=position,
                                                     desired_quote=quote_amount,
                                                     last_price=last_price,
-                                                    risk_limits=profile_risk_limits,
+                                                    risk_limits=risk_limits,
                                                 )
                                                 if not allowed:
                                                     execution_note = f"blocked:risk:{risk_reason}"
@@ -3576,12 +3642,22 @@ def main() -> None:
                                                             risk_reason,
                                                         )
                                                     quote_amount = float(risk_quote_amount)
-                                                    order_result = execution.place_entry(
-                                                        symbol=symbol,
-                                                        quote_amount=quote_amount,
-                                                        reason=f"scale_in regime={regime} action={action} score={total_score} streak={streak}",
-                                                        intent="scale_in",
-                                                    )
+                                                    if quote_amount < min_trade_quote:
+                                                        execution_note = "blocked:risk:scale_in_too_small_after_min_trade"
+                                                        logging.info(
+                                                            "[RISK ENTRY] %s adjusted_quote=%.4f min_trade_quote=%.4f reason=scale_in_too_small_after_min_trade",
+                                                            symbol,
+                                                            quote_amount,
+                                                            min_trade_quote,
+                                                        )
+                                                        order_result = None
+                                                    else:
+                                                        order_result = execution.place_entry(
+                                                            symbol=symbol,
+                                                            quote_amount=quote_amount,
+                                                            reason=f"scale_in regime={regime} action={action} score={total_score} streak={streak}",
+                                                            intent="scale_in",
+                                                        )
                                                     if order_result and order_result.get("ok"):
                                                         cycle_free_usdt = max(0.0, float(cycle_free_usdt) - float(quote_amount))
                                                         execution_note = f"scale_in_sent:{action.lower()}:streak={streak}"
@@ -3622,14 +3698,39 @@ def main() -> None:
                                                             except Exception as _dry_exc:
                                                                 logging.warning("[DRY SIM SCALE ERROR] %s %s", symbol, _dry_exc)
                                                     else:
-                                                        execution_note = f"blocked:scale_in_failed:{(order_result or {}).get('reason', 'unknown')}"
+                                                        if execution_note == "no_order":
+                                                            execution_note = f"blocked:scale_in_failed:{(order_result or {}).get('reason', 'unknown')}"
                                             else:
-                                                execution_note = "blocked:scale_in_too_small"
+                                                execution_note = f"blocked:scale_in_too_small_min_trade({quote_amount:.4f}/{min_trade_quote:.4f})"
 
                     elif action in {"FULL_CLOSE", "PARTIAL_CLOSE"}:
                         if has_position:
                             position_qty = float(position["qty"])
                             target_sell_qty = position_qty if action == "FULL_CLOSE" else position_qty * settings.partial_sell_ratio
+                            if action == "PARTIAL_CLOSE" and last_price > 0:
+                                min_trade_quote = resolve_min_trade_quote(exchange, symbol, last_price, portfolio, settings)
+                                target_sell_value = target_sell_qty * last_price
+                                position_value = position_qty * last_price
+                                if target_sell_value < min_trade_quote:
+                                    if position_value <= min_trade_quote:
+                                        target_sell_qty = position_qty
+                                        action = "FULL_CLOSE"
+                                        execution_note = "partial_promoted_full_close_min_trade"
+                                        logging.info(
+                                            "[PARTIAL SELL FLOOR] %s position_value=%.4f min_trade_quote=%.4f action=FULL_CLOSE",
+                                            symbol,
+                                            position_value,
+                                            min_trade_quote,
+                                        )
+                                    else:
+                                        target_sell_qty = min(position_qty, min_trade_quote / last_price)
+                                        logging.info(
+                                            "[PARTIAL SELL FLOOR] %s target_value=%.4f min_trade_quote=%.4f adjusted_qty=%.8f",
+                                            symbol,
+                                            target_sell_value,
+                                            min_trade_quote,
+                                            target_sell_qty,
+                                        )
                             free_base_qty = get_free_base_qty(exchange, symbol)
                             if free_base_qty <= 1e-12:
                                 execution_note = "blocked:no_free_balance"

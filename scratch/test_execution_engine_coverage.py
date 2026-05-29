@@ -1,6 +1,11 @@
 import pytest
 import logging
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from core.execution_engine import ExecutionEngine
 
 class MockSettings:
@@ -63,6 +68,12 @@ def test_place_entry_branches(engine, mock_deps):
     assert engine.place_entry("BTC/USDT", 100, "reason")["status"] == "REJECTED"
     mock_deps["exchange"].create_market_buy_by_quote.side_effect = Exception("timeout")
     assert engine.place_entry("BTC/USDT", 100, "reason")["status"] == "UNKNOWN_SUBMISSION"
+
+
+def test_minimum_order_rejection_is_hard_rejected(engine):
+    exc = Exception('okx {"code":"1","data":[{"sCode":"51020","sMsg":"Your order should meet or exceed the minimum order amount."}]}')
+
+    assert engine._is_hard_rejection(exc)
 
 def test_place_exit_branches(engine, mock_deps):
     mock_deps["orders_repo"].has_pending_or_open.return_value = True

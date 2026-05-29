@@ -285,6 +285,19 @@ def apply_regime_execution_policy(
     if regime == "RANGE":
         mean_reversion_evidence = rsi_signal > 0 or stoch_signal > 0 or bollinger_signal > 0
         if not mean_reversion_evidence:
+            adx_value = float(regime_diag.get("adx") or 0.0)
+            breakout_score_floor = min(strong_buy_threshold, buy_threshold + 1.5)
+            breakout_confirmation = (
+                trend_bias == "UP"
+                and score >= breakout_score_floor
+                and ema_trend_signal > 0
+                and ema_slope_signal > 0
+                and price_vs_ema50_signal > 0
+                and effective_ai_score >= 0
+                and (volume_spike_signal > 0 or effective_ai_score >= 1.5 or adx_value >= 24.0)
+            )
+            if breakout_confirmation:
+                return adjusted, "policy_ok_range_breakout_continuation"
             return hold("policy_block_range_without_mean_reversion")
         # DOWN trending range'de asla alım yapma (çift güvence)
         if trend_bias == "DOWN" and action in {"BUY", "STRONG_BUY"}:

@@ -40,6 +40,7 @@ class RiskEngine:
         max_single_trade_pct = float(limits.get("max_single_trade_pct", self.max_single_trade_pct))
         max_total_exposure_pct = float(limits.get("max_total_exposure_pct", self.max_total_exposure_pct))
         max_symbol_exposure_pct = float(limits.get("max_symbol_exposure_pct", self.settings.max_symbol_exposure_pct))
+        min_order_quote = float(limits.get("min_order_quote_usdt", self.settings.min_order_quote_usdt))
 
         if total_balance <= 0:
             return False, 0.0, "invalid_total_balance"
@@ -78,7 +79,7 @@ class RiskEngine:
         allowed_quote = min(allowed_quote, remaining_symbol_quote)
 
         # -------- 4. min order --------
-        if allowed_quote < self.settings.min_order_quote_usdt:
+        if allowed_quote < min_order_quote:
             return False, 0.0, "too_small_after_risk"
 
         return True, allowed_quote, "ok"
