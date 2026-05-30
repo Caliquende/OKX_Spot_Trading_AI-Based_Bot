@@ -75,6 +75,21 @@ def test_minimum_order_rejection_is_hard_rejected(engine):
 
     assert engine._is_hard_rejection(exc)
 
+
+def test_place_entry_minimum_order_exception_is_rejected(engine, mock_deps):
+    exc = Exception('okx {"code":"1","data":[{"sCode":"51020","sMsg":"Your order should meet or exceed the minimum order amount."}]}')
+    mock_deps["exchange"].create_market_buy_by_quote.side_effect = exc
+
+    result = engine.place_entry("BTC/USDT", 100, "reason", intent="scale_in")
+
+    assert result["status"] == "REJECTED"
+    mock_deps["orders_repo"].update_status.assert_called()
+    _, exchange_order_id, status, _ = mock_deps["orders_repo"].update_status.call_args.args
+    assert exchange_order_id is None
+    assert status == "REJECTED"
+    mock_deps["locks_repo"].lock.assert_not_called()
+
+
 def test_place_exit_branches(engine, mock_deps):
     mock_deps["orders_repo"].has_pending_or_open.return_value = True
     assert not engine.place_exit("BTC/USDT", 10, "reason")["ok"]
