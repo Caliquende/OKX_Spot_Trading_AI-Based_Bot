@@ -1052,6 +1052,68 @@ def compute_position_value(position: dict | None, last_price: float) -> float:
     return qty * last_price
 
 
+def is_open_trade_position(
+    position: dict | None,
+    last_price: float,
+    base_settings=settings,
+) -> bool:
+    if not position:
+        return False
+
+    status = str(position.get("status") or "").upper()
+    if status == "CLOSED":
+        return False
+
+    try:
+        qty = float(position.get("qty") or 0.0)
+    except Exception:
+        return False
+    if qty <= 0:
+        return False
+
+    try:
+        price = float(last_price or 0.0)
+    except Exception:
+        price = 0.0
+    if price <= 0:
+        return True
+
+    dust_max_value = max(
+        0.0,
+        float(getattr(base_settings, "dust_candidate_max_value_usdt", 0.05) or 0.05),
+    )
+    if dust_max_value > 0 and qty * price <= dust_max_value:
+        return False
+
+    return True
+
+
+def resolve_profile_scale_in_settings(profile_values: dict | None, base_settings=settings) -> dict:
+    values = profile_values or {}
+
+    def _int_setting(name: str, default: int) -> int:
+        raw = values.get(name, getattr(base_settings, name, default))
+        try:
+            return max(1, int(raw))
+        except Exception:
+            return max(1, int(default))
+
+    def _float_setting(name: str, default: float) -> float:
+        raw = values.get(name, getattr(base_settings, name, default))
+        try:
+            return max(0.0, float(raw))
+        except Exception:
+            return max(0.0, float(default))
+
+    return {
+        "scale_in_trigger_streak": _int_setting("scale_in_trigger_streak", 3),
+        "strong_scale_in_trigger_streak": _int_setting("strong_scale_in_trigger_streak", 3),
+        "scale_in_buy_pct": _float_setting("scale_in_buy_pct", 0.0),
+        "strong_scale_in_buy_pct": _float_setting("strong_scale_in_buy_pct", 0.0),
+        "max_scale_in_count": _int_setting("max_scale_in_count", 3),
+    }
+
+
 def resolve_min_trade_quote(
     exchange: OKXExchange,
     symbol: str,
@@ -2616,6 +2678,7 @@ def main() -> None:
                         last_price, _ = extract_reference_price(_ticker_for_price)
                     except Exception:
                         last_price = float(df["close"].iloc[-1])
+                    has_position = is_open_trade_position(position, last_price, settings)
 
                     indicator_score, indicator_details = calculate_indicator_score(df)
                     rumor = aggregate_rumor(symbol) if settings.llm_enabled else {
@@ -2734,6 +2797,7 @@ def main() -> None:
                     fraction = float(signal["fraction"])
                     stance = str(signal["stance"]).upper()
                     profile_values = get_strategy_profile_values(effective_profile)
+                    profile_scale_in = resolve_profile_scale_in_settings(profile_values, settings)
                     min_trade_pct_floor = max(0.0, float(getattr(settings, "min_trade_pct", 0.0) or 0.0))
                     profile_risk_limits = {
                         "max_symbol_exposure_pct": max(
@@ -2833,6 +2897,7 @@ def main() -> None:
                             "regime_flipped": regime_flipped,
                             "regime_params": regime_params,
                             "profile_risk_limits": profile_risk_limits,
+                            "profile_scale_in": profile_scale_in,
                             "effective_profile": effective_profile,
                             "profile_reason": profile_reason,
                             "policy_reason": policy_reason,
@@ -3402,6 +3467,10 @@ def main() -> None:
                     regime_params = decision["regime_params"]
                     profile_risk_limits = decision["profile_risk_limits"]
                     effective_profile = str(decision["effective_profile"])
+                    profile_scale_in = decision.get("profile_scale_in") or resolve_profile_scale_in_settings(
+                        get_strategy_profile_values(effective_profile),
+                        settings,
+                    )
                     profile_reason = str(decision["profile_reason"])
                     decision_reason = str(decision.get("decision_reason") or f"profile:{profile_reason}")
                     total_score = float(decision["total_score"])
@@ -3569,11 +3638,15 @@ def main() -> None:
                                     reset_scale_in_pullback_count(bot_state_repo, symbol)
 
                                 if scale_in_allowed:
-                                    trigger = settings.strong_scale_in_trigger_streak if action == "STRONG_BUY" else settings.scale_in_trigger_streak
+                                    trigger = (
+                                        profile_scale_in["strong_scale_in_trigger_streak"]
+                                        if action == "STRONG_BUY"
+                                        else profile_scale_in["scale_in_trigger_streak"]
+                                    )
                                     if streak < trigger:
                                         execution_note = f"blocked:scale_in_wait_streak({streak}/{trigger})"
                                     else:
-                                        _max_scale_in = int(getattr(settings, "max_scale_in_count", 3))
+                                        _max_scale_in = int(profile_scale_in["max_scale_in_count"])
                                         _scale_key = f"scale_in_count:{symbol}"
                                         _scale_state = bot_state_repo.get(_scale_key) or {}
                                         _scale_count = int(_scale_state.get("count") or 0)
@@ -3583,7 +3656,11 @@ def main() -> None:
                                         else:
                                             position_value = compute_position_value(position, last_price)
                                             total_balance = max(float(portfolio["total_balance"]), 1e-12)
-                                            scale_fraction = settings.strong_scale_in_buy_pct if action == "STRONG_BUY" else settings.scale_in_buy_pct
+                                            scale_fraction = (
+                                                profile_scale_in["strong_scale_in_buy_pct"]
+                                                if action == "STRONG_BUY"
+                                                else profile_scale_in["scale_in_buy_pct"]
+                                            )
                                             min_trade_quote = resolve_min_trade_quote(exchange, symbol, last_price, portfolio, settings)
                                             desired_quote = max(total_balance * scale_fraction, min_trade_quote)
                                             exposure_cap_quote = max(0.0, total_balance * profile_risk_limits["max_symbol_exposure_pct"] - position_value)
