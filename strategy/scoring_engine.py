@@ -215,6 +215,8 @@ def apply_regime_execution_policy(
     evaluate_signal ham skoru aksiyona çevirir. Bu fonksiyon o aksiyonu piyasa
     rejimine göre filtreler veya risk azaltma tarafında sertleştirir.
     """
+    from config.settings import settings
+
     params = _resolve_signal_params(regime_params)
     regime_params = regime_params or {}
     regime_diag = regime_diag or {}
@@ -256,16 +258,37 @@ def apply_regime_execution_policy(
     if action in {"BUY", "STRONG_BUY"} and global_market_bearish and not has_position:
         return hold("policy_block_global_market_bearish")
 
-    # Zarar büyüdüğünde kademeli çıkış yerine tam risk azaltma.
-    # Eski loglarda ana zarar indicator_partial_close zincirinden geldi.
-    if has_position and action == "PARTIAL_CLOSE" and position_pnl_pct is not None:
+    # === PROFIT PROTECTION — TP/trailing'in işini yapmasını bekle ===
+    # Kanıtlanmış veri: indicator_full_close %7 win rate (218 trade, -8.77 USDT).
+    # TP mekanizmaları %100 win rate. Karda pozisyonu indikatör gürültüsüyle kesmek tek kanamanın kaynağı.
+    # Kural: pozisyon karda (> profit_protection_pnl_pct) ise indicator exit'i blokla; TP/trailing halleder.
+    if has_position and action in {"FULL_CLOSE", "PARTIAL_CLOSE"} and position_pnl_pct is not None:
         pnl = float(position_pnl_pct)
-        if pnl <= -0.02 and regime in {"CHOP", "VOLATILE"}:
-            return promote_full_close(f"policy_full_close_loser_{regime.lower()}")
-        if pnl <= -0.015 and trend_bias == "DOWN":
+        profit_floor = float(getattr(settings, "profit_protection_pnl_pct", 0.005))
+        if pnl >= profit_floor:
+            return hold("policy_protect_profit_let_tp_run")
+
+    # === INDICATOR EXIT GUARD — küçük zararda çıkışı düşür, büyük zararda ve rejim olumsuzsa tam kapat ===
+    # Eski hata: çıplak "if pnl < 0" her mikro-zararı FULL_CLOSE'a yükseltiyordu.
+    # Yeni mantık: tam kapatma sadece zarar eşiği + rejim/trend koşulunu birlikte karşılıyorsa yapılır.
+    if has_position and action in {"FULL_CLOSE", "PARTIAL_CLOSE"} and position_pnl_pct is not None:
+        pnl = float(position_pnl_pct)
+        loser_full_close_min_loss_pct = float(
+            getattr(settings, "loser_full_close_min_loss_pct", 0.012)
+        )
+        regime_adverse = regime in {"CHOP", "VOLATILE"}
+        trend_adverse = trend_bias == "DOWN"
+        # Küçük zarar ve rejim/trend nötr: indicator exit'i blokla (gürültü olabilir)
+        indicator_exit_min_loss_pct = float(
+            getattr(settings, "indicator_exit_min_loss_pct", 0.0)
+        )
+        if indicator_exit_min_loss_pct > 0 and pnl > -indicator_exit_min_loss_pct:
+            return hold("policy_hold_small_loss_within_gate")
+        # PARTIAL_CLOSE → FULL_CLOSE yükseltme: yalnızca büyük zarar + olumsuz rejim/trend
+        if action == "PARTIAL_CLOSE" and pnl <= -loser_full_close_min_loss_pct and (regime_adverse or trend_adverse):
+            if regime_adverse:
+                return promote_full_close(f"policy_full_close_loser_{regime.lower()}")
             return promote_full_close("policy_full_close_loser_down_bias")
-        if pnl < 0:
-            return promote_full_close("policy_full_close_loser")
 
     if has_position and action == "PARTIAL_CLOSE" and regime == "VOLATILE" and trend_bias == "DOWN":
         return promote_full_close("policy_full_close_volatile_down_bias")

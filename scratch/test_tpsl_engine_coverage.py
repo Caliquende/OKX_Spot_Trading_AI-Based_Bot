@@ -107,15 +107,22 @@ def test_break_even_hit(engine):
     assert not res["triggered"]
 
 def test_profit_roundtrip_hit(engine):
+    # YENI: early-profit aktivasyonu config'ten 0.04 (eski hardcoded 0.025 degil).
+    # break-even (aktivasyon 0.04) pnl<=0'da once devreye girdigi icin izole test
+    # icin break-even kapatilir; peak >=%4 olacak sekilde 105 kullanilir.
+    engine.settings.break_even_stop_enabled = False
     pos = {"qty": 1, "status": "OPEN", "avg_entry_price": 100}
-    engine.evaluate("BTC/USDT", pos, 103) 
-    res = engine.evaluate("BTC/USDT", pos, 100)
+    engine.evaluate("BTC/USDT", pos, 105)  # peak +5% (>= early activation 4%)
+    res = engine.evaluate("BTC/USDT", pos, 100)  # pnl 0 -> roundtrip
     assert res["reason"] == "profit_roundtrip_stop_hit"
 
 def test_early_trailing_hit(engine):
+    # YENI: full/partial TP artik early-profit'ten ONCE kontrol edildigi icin
+    # early_trailing'i izole etmek adina partial TP kapatilir. Giveback 0.012.
+    engine.settings.partial_take_profit_enabled = False
     pos = {"qty": 1, "status": "OPEN", "avg_entry_price": 100}
-    engine.evaluate("BTC/USDT", pos, 103)
-    res = engine.evaluate("BTC/USDT", pos, 100.5)
+    engine.evaluate("BTC/USDT", pos, 105)  # peak +5%
+    res = engine.evaluate("BTC/USDT", pos, 103.7)  # retrace ~1.24% >= early giveback 1.2%
     assert res["reason"] == "early_trailing_profit_hit"
 
 def test_full_tp_hit(engine):
@@ -139,14 +146,16 @@ def test_partial_tp_hit(engine):
 def test_trailing_tp_hit(engine):
     # Disable partial TP
     engine.settings.partial_take_profit_enabled = False
-    # Use giveback < 2% (early) but > own
+    # Trailing giveback 1.0% < early giveback 1.2%; retrace araligini ikisinin
+    # arasinda tutarak early-profit'i atla, trailing'i tetikle.
     engine.settings.trailing_take_profit_giveback_pct = 0.01
     pos = {"qty": 1, "status": "OPEN", "avg_entry_price": 100}
-    engine.evaluate("BTC/USDT", pos, 107) 
-    res = engine.evaluate("BTC/USDT", pos, 105.5)
+    engine.evaluate("BTC/USDT", pos, 107)  # peak +7% (>= trailing activation 6%)
+    res = engine.evaluate("BTC/USDT", pos, 105.8)  # retrace ~1.12%: >=1.0% trailing, <1.2% early
     assert res["reason"] == "trailing_take_profit_hit"
     engine.settings.trailing_take_profit_enabled = False
-    res = engine.evaluate("BTC/USDT", pos, 105.5)
+    # retrace ~1.12% < early giveback 1.2% -> early-profit de tetiklenmez
+    res = engine.evaluate("BTC/USDT", pos, 105.8)
     assert not res["triggered"]
 
 def test_mark_partial_done(engine, repo):

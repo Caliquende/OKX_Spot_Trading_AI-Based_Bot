@@ -53,7 +53,7 @@ from zoneinfo import ZoneInfo
 import ccxt
 import pandas as pd
 
-from analysis.rumor_analyzer import aggregate_rumor, clear_refresh_state, refresh_all_if_needed, get_cached_rumors, update_thresholds_if_needed
+from analysis.rumor_analyzer import aggregate_rumor, clear_refresh_state, refresh_all_if_needed, get_cached_rumors, update_thresholds_if_needed, has_configured_llm_provider
 
 try:
     from analysis.rumor_analyzer import get_last_bulk_refresh_model, get_last_threshold_update_model, get_last_llm_models
@@ -284,8 +284,10 @@ def apply_ai_thresholds_conservatively(regime_params: dict, ai_thresholds: dict)
         buy_pct = base_buy_pct
         strong_buy_pct = base_strong_buy_pct
 
-    sell_threshold = max(base_sell, _clamp_float(ai_thresholds.get("sell_threshold"), base_sell, -18.0, -1.0))
-    strong_sell_threshold = max(
+    # Sell eşiği için "muhafazakâr uygula" = çıkışı zorlaştır (daha negatif eşik al).
+    # max() yerine min() kullanılır; AI'ın -2.5 önermesi base -5'i -2.5'e çekmesin (erken exit kanar).
+    sell_threshold = min(base_sell, _clamp_float(ai_thresholds.get("sell_threshold"), base_sell, -18.0, -1.0))
+    strong_sell_threshold = min(
         base_strong_sell,
         _clamp_float(ai_thresholds.get("strong_sell_threshold"), base_strong_sell, -20.0, -1.0),
     )
@@ -666,9 +668,9 @@ def _format_cycle_symbol_line(raw_line: str) -> list[str]:
     if why:
         lines.append(f"  Why: {_telegram_shorten(why, 130)}")
 
-    groq = fields.get("groq")
+    groq = fields.get("groq") or fields.get("ai")
     if groq:
-        lines.append(f"  Groq: {_telegram_shorten(groq, 130)}")
+        lines.append(f"  AI: {_telegram_shorten(groq, 130)}")
 
     policy = fields.get("policy")
     if policy and policy != "policy_ok":
@@ -808,13 +810,23 @@ def format_ai_thresholds_message(ai_thresholds: dict, threshold_model: str) -> s
     return "\n".join(lines)
 
 
+def first_llm_provider(providers: list[dict]) -> dict | None:
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        provider_name = str(provider.get("provider") or "").strip()
+        if provider_name and provider_name != "no_provider":
+            return provider
+    return None
+
+
 def format_groq_sentiment_report(
     rumors: dict,
     refreshed: bool,
     force_groq_refresh: bool,
     bulk_model: str,
 ) -> tuple[str, bool]:
-    lines = _telegram_title("Groq Sentiment Report")
+    lines = _telegram_title("AI Sentiment Report")
     if bulk_model:
         lines += ["", f"Model: {bulk_model}"]
     if not refreshed:
@@ -824,14 +836,15 @@ def format_groq_sentiment_report(
     has_non_zero = False
     for sym, rumor in rumors.items():
         providers = rumor.get("providers", []) if isinstance(rumor, dict) else []
-        groq = next((p for p in providers if p.get("provider") == "groq"), None)
-        if not groq:
+        ai_provider = first_llm_provider(providers)
+        if not ai_provider:
             continue
 
-        summary = str(groq.get("summary", "") or "").strip()
-        score = groq.get("rumor_score", 0)
+        provider_name = str(ai_provider.get("provider") or "llm")
+        summary = str(ai_provider.get("summary", "") or "").strip()
+        score = ai_provider.get("rumor_score", 0)
         if score != 0:
-            lines.append(f"  {sym} | {groq.get('stance')} | score {score}")
+            lines.append(f"  {sym} | {provider_name} | {ai_provider.get('stance')} | score {score}")
             lines += [f"    {part}" for part in _telegram_wrap(summary, width=78)[:2]]
             has_non_zero = True
         elif summary and "rate limit" in summary.lower():
@@ -839,9 +852,19 @@ def format_groq_sentiment_report(
             has_non_zero = True
 
     if not has_non_zero and (refreshed or force_groq_refresh):
-        lines.append("  No non-zero Groq signals.")
+        lines.append("  No non-zero AI signals.")
 
     return "\n".join(lines), has_non_zero
+
+
+def should_notify_sentiment_report(
+    *,
+    notify_every_cycle: bool,
+    refreshed: bool,
+    force_refresh: bool,
+) -> bool:
+    """Cached non-zero signals must not bypass NOTIFY_EVERY_CYCLE."""
+    return bool(notify_every_cycle or refreshed or force_refresh)
 
 
 def normalize_bias(stance: str) -> str:
@@ -1383,6 +1406,7 @@ def run_dust_maintenance(
     notifier: TelegramNotifier | None,
     current_cycle_actions: dict[str, str] | None = None,
     force_notify: bool = False,
+    notify_every_cycle: bool = False,
 ) -> dict[str, Any]:
     mode = str(getattr(settings, "dust_maintenance_mode", "auto_convert") or "auto_convert").lower()
     if mode == "off":
@@ -1396,7 +1420,13 @@ def run_dust_maintenance(
     state_key = "dust_maintenance_state"
     state = bot_state_repo.get(state_key) or {}
     last_run_ms = int((state or {}).get("last_run_ms") or 0)
-    if not force_notify and interval_ms > 0 and last_run_ms > 0 and now_ms - last_run_ms < interval_ms:
+    if (
+        not force_notify
+        and not notify_every_cycle
+        and interval_ms > 0
+        and last_run_ms > 0
+        and now_ms - last_run_ms < interval_ms
+    ):
         return {"ok": True, "mode": mode, "skipped": "interval_not_elapsed"}
 
     max_value_usdt = float(getattr(settings, "dust_candidate_max_value_usdt", 0.05) or 0.05)
@@ -1499,7 +1529,7 @@ def run_dust_maintenance(
         now_ms,
     )
 
-    if force_notify or selected or skipped:
+    if force_notify or notify_every_cycle or selected or skipped:
         notify_safe(
             notifier,
             _format_dust_maintenance_message(
@@ -1780,7 +1810,7 @@ def handle_force_command(
             bot_state_repo.set("force_refresh_thresholds_requested", True, now_ms)
             bot_state_repo.set("manual_cycle_requested", True, now_ms)
 
-            notify_safe(notifier, "[FORCE REFRESH] queued. Groq cache cleared and immediate cycle requested.")
+            notify_safe(notifier, "[FORCE REFRESH] queued. AI cache cleared and immediate cycle requested.")
 
             return
 
@@ -2447,6 +2477,45 @@ def main() -> None:
         float(getattr(risk_engine, "max_single_trade_pct", 0.0)),
     )
 
+    # Profil-override sonrası GERÇEK (resolved) değerlerin tek seferlik görünürlüğü.
+    logging.info(
+        "[RESOLVED CONFIG] dry_run=%s strategy_profile=%s strategy_profile_mode=%s timeframe=%s "
+        "buy_threshold=%.4f sell_threshold=%.4f stop_loss_pct=%.4f max_daily_drawdown_pct=%.4f "
+        "exit_cooldown_minutes=%.2f symbol_cooldown_minutes=%.2f min_trade_pct=%.4f max_single_trade_pct=%.4f "
+        "scale_in_enabled=%s llm_enabled=%s entry_confirmation_streak=%s indicator_exit_confirmation_streak=%s",
+        settings.dry_run,
+        settings.strategy_profile,
+        settings.strategy_profile_mode,
+        settings.timeframe,
+        float(getattr(settings, "buy_threshold", 0.0) or 0.0),
+        float(getattr(settings, "sell_threshold", 0.0) or 0.0),
+        float(getattr(settings, "stop_loss_pct", 0.0) or 0.0),
+        float(getattr(settings, "max_daily_drawdown_pct", 0.0) or 0.0),
+        float(getattr(settings, "exit_cooldown_minutes", 0.0) or 0.0),
+        float(getattr(settings, "symbol_cooldown_minutes", 0.0) or 0.0),
+        float(getattr(settings, "min_trade_pct", 0.0) or 0.0),
+        float(getattr(settings, "max_single_trade_pct", 0.0) or 0.0),
+        settings.scale_in_enabled,
+        settings.llm_enabled,
+        int(getattr(settings, "entry_confirmation_streak", 0) or 0),
+        int(getattr(settings, "indicator_exit_confirmation_streak", 0) or 0),
+    )
+
+    # MIN-TRADE AYRIMI tutarlılık kontrolü: strateji alt tabanı, tek-trade üst sınırını aşmamalı.
+    _min_trade_pct = float(getattr(settings, "min_trade_pct", 0.0) or 0.0)
+    _max_single_trade_pct = float(getattr(settings, "max_single_trade_pct", 0.0) or 0.0)
+    if _max_single_trade_pct > 0 and _min_trade_pct > _max_single_trade_pct:
+        logging.warning(
+            "[CONFIG CONSISTENCY] min_trade_pct=%.4f > max_single_trade_pct=%.4f "
+            "(min trade tabani max single trade sinirini asiyor; config kontrol edin)",
+            _min_trade_pct,
+            _max_single_trade_pct,
+        )
+
+    # Indicator-exit teyidi icin per-symbol ardisik olumsuz (cikis) sinyal sayaci.
+    # In-memory; cycle'lar arasi yeterli, kaliciligi sart degil.
+    indicator_exit_neg_streak: dict[str, int] = {}
+
     while True:
         cycle_started_ms = int(time.time() * 1000)
         symbol_lines: list[str] = []
@@ -2470,6 +2539,7 @@ def main() -> None:
                     bot_state_repo=bot_state_repo,
                     reconciler=reconciler,
                     notifier=notifier,
+                    notify_every_cycle=settings.notify_every_cycle,
                 )
             except Exception as dust_exc:
                 logging.exception("[DUST MAINT ERROR] %s", dust_exc)
@@ -2575,6 +2645,7 @@ def main() -> None:
                         str(ai_thresholds.get("model") or "").strip()
                         or get_last_threshold_update_model()
                         or llm_models.get("threshold_update")
+                        or str(getattr(settings, "bedrock_model", "") or "").strip()
                         or str(getattr(settings, "groq_model", "") or "").strip()
                     )
                     notify_safe(notifier, format_ai_thresholds_message(ai_thresholds, threshold_model))
@@ -2589,6 +2660,7 @@ def main() -> None:
                 bulk_model = (
                     get_last_bulk_refresh_model()
                     or llm_models.get("bulk_refresh")
+                    or str(getattr(settings, "bedrock_model", "") or "").strip()
                     or str(getattr(settings, "groq_model", "") or "").strip()
                 )
                 sentiment_message, has_non_zero = format_groq_sentiment_report(
@@ -2597,28 +2669,32 @@ def main() -> None:
                     force_groq_refresh,
                     bulk_model,
                 )
-                if has_non_zero or refreshed or force_groq_refresh:
+                if should_notify_sentiment_report(
+                    notify_every_cycle=settings.notify_every_cycle,
+                    refreshed=refreshed,
+                    force_refresh=force_groq_refresh,
+                ):
                     notify_safe(notifier, sentiment_message)
 
                 if force_groq_refresh:
                     now_ms = int(time.time() * 1000)
                     if refreshed:
                         bot_state_repo.set("force_refresh_groq_requested", False, now_ms)
-                        notify_safe(notifier, "[FORCE REFRESH][GROQ] OK")
-                    elif not settings.groq_api_key:
+                        notify_safe(notifier, "[FORCE REFRESH][AI] OK")
+                    elif not has_configured_llm_provider():
                         bot_state_repo.set("force_refresh_groq_requested", False, now_ms)
-                        notify_safe(notifier, "[FORCE REFRESH][GROQ] SKIPPED - groq api key missing")
+                        notify_safe(notifier, "[FORCE REFRESH][AI] SKIPPED - llm provider missing")
                     else:
-                        notify_safe(notifier, "[FORCE REFRESH][GROQ] FAILED - will retry next cycle")
+                        notify_safe(notifier, "[FORCE REFRESH][AI] FAILED - will retry next cycle")
 
                 if force_threshold_refresh:
                     now_ms = int(time.time() * 1000)
                     if ai_thresholds:
                         bot_state_repo.set("force_refresh_thresholds_requested", False, now_ms)
                         notify_safe(notifier, "[FORCE REFRESH][AI THRESHOLDS] OK")
-                    elif not settings.groq_api_key:
+                    elif not has_configured_llm_provider():
                         bot_state_repo.set("force_refresh_thresholds_requested", False, now_ms)
-                        notify_safe(notifier, "[FORCE REFRESH][AI THRESHOLDS] SKIPPED - groq api key missing")
+                        notify_safe(notifier, "[FORCE REFRESH][AI THRESHOLDS] SKIPPED - llm provider missing")
                     else:
                         notify_safe(notifier, "[FORCE REFRESH][AI THRESHOLDS] FAILED - will retry next cycle")
 
@@ -2668,9 +2744,12 @@ def main() -> None:
                     if not ohlcv_rows:
                         ohlcv_rows = exchange.fetch_ohlcv(symbol, settings.timeframe, settings.ohlcv_limit)
                     df = ohlcv_to_df(ohlcv_rows)
+                    # Incomplete current candle'ı at — göstergeler kapanmış mum verisinde hesaplanır.
+                    # last_price ayrıca fetch_ticker'dan alınıyor; df[-1] fallback olarak yeterli.
+                    if len(df) > 1:
+                        df = df.iloc[:-1].copy()
                     df = calculate_indicators(df)
                     # last_price: TP/SL ve position value hesapları için live fiyat kullan.
-                    # df["close"].iloc[-1] live bar'ın anlık fiyatıdır — henüz kapanmamış.
                     # extract_reference_price: mark > index > last önceliğiyle doğru kaynağı seçer.
                     # fetch_ticker başarısız olursa df close'a fallback yapılır.
                     try:
@@ -3426,14 +3505,15 @@ def main() -> None:
                         )
 
                     order_text = execution_note if order_result is None else str(order_result)
-                    groq_provider = next((p for p in rumor.get("providers", []) if p["provider"] == "groq"), None)
+                    groq_provider = first_llm_provider(rumor.get("providers", []))
                     groq_text = ""
                     ai_text = ""
                     if groq_provider and settings.llm_enabled:
+                        groq_name = groq_provider.get("provider", "llm")
                         groq_score = groq_provider.get("rumor_score", 0)
                         groq_stance = groq_provider.get("stance", "N/A")
                         groq_summary = groq_provider.get("summary", "")[:50]
-                        groq_text = f" | groq={groq_stance}({groq_score}) {groq_summary}..."
+                        groq_text = f" | ai[{groq_name}]={groq_stance}({groq_score}) {groq_summary}..."
                     if regime_params.get("ai_adjusted"):
                         ai_text = " [AI_THRESHOLDS]"
                     log_line = (
@@ -3484,8 +3564,24 @@ def main() -> None:
                     order_result = None
                     execution_note = "no_order"
 
+                    # INDICATOR-EXIT TEYIDI: ardisik olmayan sinyallerde (BUY/HOLD) negatif zincir kirilir.
+                    if action not in {"FULL_CLOSE", "PARTIAL_CLOSE"}:
+                        indicator_exit_neg_streak.pop(symbol, None)
+
                     if action in {"BUY", "STRONG_BUY"}:
-                        if trading_control["entries_blocked"]:
+                        # GIRIS TEYIDI: streak (BUY yonlu pozitif sayac) esige ulasmadan giris yapma.
+                        # entry_confirmation_streak==0 ise eski davranis (teyit kapali).
+                        _entry_confirm = int(getattr(settings, "entry_confirmation_streak", 0) or 0)
+                        if _entry_confirm > 0 and streak < _entry_confirm:
+                            execution_note = f"blocked:entry_wait_confirmation({streak}/{_entry_confirm})"
+                            logging.info(
+                                "[ENTRY CONFIRM] %s teyit bekleniyor action=%s streak=%d/%d -> HOLD",
+                                symbol,
+                                action,
+                                int(streak),
+                                _entry_confirm,
+                            )
+                        elif trading_control["entries_blocked"]:
                             execution_note = str(trading_control["entry_block_reason"])
                         elif not reconcile_ok:
                             execution_note = "blocked:reconcile_fail"
@@ -3781,7 +3877,30 @@ def main() -> None:
                                                 execution_note = f"blocked:scale_in_too_small_min_trade({quote_amount:.4f}/{min_trade_quote:.4f})"
 
                     elif action in {"FULL_CLOSE", "PARTIAL_CLOSE"}:
-                        if has_position:
+                        # INDICATOR-EXIT TEYIDI: tpsl tetiklenmediyse (skor temelli cikis), olumsuz sinyal
+                        # ardisik olarak esige ulasana kadar cikisi ERTELE. SL/break-even gibi tpsl-tetikli
+                        # cikislar (triggered=True) ASLA ertelenmez (guvenlik onceligi).
+                        # indicator_exit_confirmation_streak==0 ise eski davranis.
+                        _ind_exit_confirm = int(getattr(settings, "indicator_exit_confirmation_streak", 0) or 0)
+                        _is_indicator_exit = not bool(tpsl_decision.get("triggered"))
+                        _defer_exit = False
+                        if _ind_exit_confirm > 0 and _is_indicator_exit and has_position:
+                            _neg = int(indicator_exit_neg_streak.get(symbol, 0)) + 1
+                            indicator_exit_neg_streak[symbol] = _neg
+                            if _neg < _ind_exit_confirm:
+                                _defer_exit = True
+                                execution_note = f"blocked:exit_wait_confirmation({_neg}/{_ind_exit_confirm})"
+                                logging.info(
+                                    "[EXIT CONFIRM] %s indicator cikis ertelendi action=%s neg_streak=%d/%d -> HOLD",
+                                    symbol,
+                                    action,
+                                    _neg,
+                                    _ind_exit_confirm,
+                                )
+                        if _defer_exit:
+                            pass  # teyit esigine ulasilmadi: cikisi bu cycle uygulama (HOLD gibi davran)
+                        elif has_position:
+                            indicator_exit_neg_streak.pop(symbol, None)
                             position_qty = float(position["qty"])
                             target_sell_qty = position_qty if action == "FULL_CLOSE" else position_qty * settings.partial_sell_ratio
                             if action == "PARTIAL_CLOSE" and last_price > 0:
@@ -3969,14 +4088,15 @@ def main() -> None:
                         )
 
                     order_text = execution_note if order_result is None else str(order_result)
-                    groq_provider = next((p for p in rumor.get("providers", []) if p["provider"] == "groq"), None)
+                    groq_provider = first_llm_provider(rumor.get("providers", []))
                     groq_text = ""
                     ai_text = ""
                     if groq_provider and settings.llm_enabled:
+                        groq_name = groq_provider.get("provider", "llm")
                         groq_score = groq_provider.get("rumor_score", 0)
                         groq_stance = groq_provider.get("stance", "N/A")
                         groq_summary = groq_provider.get("summary", "")[:50]
-                        groq_text = f" | groq={groq_stance}({groq_score}) {groq_summary}..."
+                        groq_text = f" | ai[{groq_name}]={groq_stance}({groq_score}) {groq_summary}..."
                     if regime_params.get("ai_adjusted"):
                         ai_text = " [AI_THRESHOLDS]"
                     thresholds_text = (
@@ -4014,14 +4134,15 @@ def main() -> None:
                                 f"qty={float(position['qty']):.8f} avg={float(position['avg_entry_price']):.6f} realized={float(position['realized_pnl_quote']):.4f}"
                             )
 
-                        groq_provider = next((p for p in rumor.get("providers", []) if p["provider"] == "groq"), None)
+                        groq_provider = first_llm_provider(rumor.get("providers", []))
                         groq_text = ""
                         ai_text = " [AI_THRESHOLDS]" if regime_params.get("ai_adjusted") else ""
                         if groq_provider and settings.llm_enabled:
+                            groq_name = groq_provider.get("provider", "llm")
                             groq_score = groq_provider.get("rumor_score", 0)
                             groq_stance = groq_provider.get("stance", "N/A")
                             groq_summary = groq_provider.get("summary", "")[:50]
-                            groq_text = f" | groq={groq_stance}({groq_score}) {groq_summary}..."
+                            groq_text = f" | ai[{groq_name}]={groq_stance}({groq_score}) {groq_summary}..."
                         thresholds_text = (
                             f"buy={float(regime_params.get('buy_threshold') or 0.0):.2f} "
                             f"strong_buy={float(regime_params.get('strong_buy_threshold') or 0.0):.2f} "

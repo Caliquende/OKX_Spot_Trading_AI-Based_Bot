@@ -11,6 +11,7 @@ def test_bulk_refresh_prompt_is_capped_and_fallback_flow_still_called(monkeypatc
     captured = {}
 
     class FakeGroqProvider:
+        name = "groq"
         cache_namespace = "fake"
 
         def __init__(self, api_key: str, model: str):
@@ -42,7 +43,7 @@ def test_bulk_refresh_prompt_is_capped_and_fallback_flow_still_called(monkeypatc
     )
     monkeypatch.setattr(rumor_analyzer, "GroqProvider", FakeGroqProvider)
     monkeypatch.setattr(rumor_analyzer, "build_symbol_research_context", lambda symbol: "x" * 2000)
-    monkeypatch.setattr(rumor_analyzer, "_groq_last_refresh", 0.0)
+    monkeypatch.setattr(rumor_analyzer, "_llm_last_refresh", 0.0)
 
     market_data = {
         "BTC/USDT": {"price": 100, "volume": 1, "change_24h": 2, "price_action": {"structure": "range", "breakout_state": "none"}},
@@ -56,11 +57,13 @@ def test_bulk_refresh_prompt_is_capped_and_fallback_flow_still_called(monkeypatc
     assert captured["context_label"] == "bulk_refresh"
     assert len(user_prompt) < 1400
     assert "x" * 500 not in user_prompt
-    assert rumor_analyzer.get_last_bulk_refresh_model() == "fake-model"
+    assert rumor_analyzer.get_last_bulk_refresh_model() == "groq:fake-model"
 
 
 def test_threshold_update_clamps_and_records_model(monkeypatch):
     class FakeGroqProvider:
+        name = "groq"
+
         def __init__(self, api_key: str, model: str):
             pass
 
@@ -113,4 +116,129 @@ def test_threshold_update_clamps_and_records_model(monkeypatch):
     assert result["strong_sell_threshold"] == -15.0
     assert result["buy_pct"] == 0.20
     assert result["strong_buy_pct"] == 0.20
-    assert rumor_analyzer.get_last_threshold_update_model() == "threshold-model"
+    assert rumor_analyzer.get_last_threshold_update_model() == "groq:threshold-model"
+
+
+def test_bedrock_converse_payload_extracts_system_and_uses_text_blocks():
+    payload = {
+        "messages": [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "user prompt"},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 123,
+    }
+
+    body = rumor_analyzer._build_bedrock_converse_payload(payload)
+
+    assert body["system"] == [{"text": "system prompt"}]
+    assert body["inferenceConfig"]["temperature"] == 0.2
+    assert body["inferenceConfig"]["maxTokens"] == 123
+    assert body["messages"] == [
+        {"role": "user", "content": [{"text": "user prompt"}]},
+    ]
+
+
+def test_bedrock_converse_text_extraction_from_output_message():
+    data = {
+        "output": {
+            "message": {
+                "content": [
+                    {"text": "{\"stance\":\"HOLD\""},
+                    {"text": ",\"score\":0}"},
+                ]
+            }
+        }
+    }
+
+    assert rumor_analyzer._extract_bedrock_converse_text(data) == "{\"stance\":\"HOLD\",\"score\":0}"
+
+
+def test_provider_fallback_uses_groq_after_bedrock_failure(monkeypatch):
+    calls = []
+
+    class FakeBedrockProvider:
+        name = "bedrock"
+        cache_namespace = "bedrock:test"
+
+        def __init__(self, api_key: str, model: str, region: str):
+            self.api_key = api_key
+            self.model = model
+            self.region = region
+
+        def is_enabled(self):
+            return True
+
+        def _request_parsed(self, payload, timeout_seconds, expect, context_label):
+            calls.append("bedrock")
+            return None, None, "not json"
+
+    class FakeGroqProvider:
+        name = "groq"
+        cache_namespace = "groq:test"
+
+        def __init__(self, api_key: str, model: str):
+            self.api_key = api_key
+            self.model = model
+
+        def is_enabled(self):
+            return True
+
+        def _request_parsed(self, payload, timeout_seconds, expect, context_label):
+            calls.append("groq")
+            return {"stance": "HOLD", "score": 0, "confidence": 0.5, "reasoning": "test"}, self.model, "{}"
+
+    monkeypatch.setattr(
+        rumor_analyzer,
+        "settings",
+        SimpleNamespace(
+            llm_provider_order="bedrock,groq",
+            aws_bearer_token_bedrock="bedrock-key",
+            bedrock_model="bedrock-model",
+            bedrock_region="us-east-1",
+            groq_api_key="test-key",
+            groq_model="groq-model",
+        ),
+    )
+    monkeypatch.setattr(rumor_analyzer, "BedrockProvider", FakeBedrockProvider)
+    monkeypatch.setattr(rumor_analyzer, "GroqProvider", FakeGroqProvider)
+
+    provider, parsed, used_model, _ = rumor_analyzer._request_parsed_with_provider_fallback(
+        {"messages": [{"role": "user", "content": "x"}]},
+        timeout_seconds=5,
+        expect="object",
+        context_label="test",
+    )
+
+    assert calls == ["bedrock", "groq"]
+    assert provider.name == "groq"
+    assert parsed["stance"] == "HOLD"
+    assert used_model == "groq-model"
+
+
+def test_missing_bedrock_key_still_builds_groq_provider(monkeypatch):
+    class FakeGroqProvider:
+        name = "groq"
+        cache_namespace = "groq:test"
+
+        def __init__(self, api_key: str, model: str):
+            self.api_key = api_key
+            self.model = model
+
+        def is_enabled(self):
+            return True
+
+    monkeypatch.setattr(
+        rumor_analyzer,
+        "settings",
+        SimpleNamespace(
+            llm_provider_order="bedrock,groq",
+            groq_api_key="test-key",
+            groq_model="groq-model",
+        ),
+    )
+    monkeypatch.setattr(rumor_analyzer, "GroqProvider", FakeGroqProvider)
+
+    providers = rumor_analyzer.build_provider_list()
+
+    assert [provider.name for provider in providers] == ["groq"]

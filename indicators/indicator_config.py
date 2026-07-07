@@ -19,8 +19,11 @@ WEIGHTS = {
 
     # trend core
     "ema_trend": 1.5,
-    "ema_slope": 1.2,
-    "price_vs_ema50": 1.0,
+    # ema_slope ve price_vs_ema50, ema_trend ile eşdoğrusal (collinear) sinyallerdir;
+    # hepsi "fiyat EMA üstünde mi" sorusunun türevi olduğu için birlikte flip eder.
+    # Yapay trend şişmesini (~1.1 puan) kırmak için ağırlıkları ölçülü düşürüldü.
+    "ema_slope": 0.6,
+    "price_vs_ema50": 0.5,
 
     # regime filter
     "adx": 1.3,

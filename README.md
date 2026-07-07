@@ -44,7 +44,7 @@ Important folders and files:
 - `core/`: execution, risk, health, reconcile, portfolio, and position logic
 - `strategy/`: regime and scoring logic
 - `indicators/`: technical indicator calculations
-- `analysis/`: Groq, Exa, and CoinGecko-based research and sentiment layer
+- `analysis/`: Bedrock/Groq, Exa, and CoinGecko-based research and sentiment layer
 - `db/`: SQLite schema and repository layer
 - `reporting/`: Telegram notifications
 - `docs/`: desktop app notes and UI design documents
@@ -57,7 +57,7 @@ Important folders and files:
 - OKX API credentials
 - SQLite, included with Python
 - Optional Telegram bot token and chat ID for notifications and remote controls
-- Optional Groq, Exa, and CoinGecko credentials for AI/research features
+- Optional AWS Bedrock API key, Groq, Exa, and CoinGecko credentials for AI/research features
 
 ## Python Dependencies
 
@@ -225,7 +225,7 @@ Important setting groups visible in the repo:
 - TP/SL: `STOP_LOSS_PCT`, `PARTIAL_TAKE_PROFIT_PCT`, `FULL_TAKE_PROFIT_PCT`, `BREAK_EVEN_*`, `TRAILING_TAKE_PROFIT_*`
 - Regime engine: `REGIME_*`
 - Telegram: `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`, `NOTIFY_EVERY_CYCLE`
-- AI and research: `LLM_ENABLED`, `GROQ_*`, `EXA_API_KEY`, `COINGECKO_*`
+- AI and research: `LLM_ENABLED`, `LLM_PROVIDER_ORDER`, `AWS_BEARER_TOKEN_BEDROCK`, `BEDROCK_*`, `GROQ_*`, `EXA_API_KEY`, `COINGECKO_*`
 
 ## Database and State
 
@@ -256,7 +256,7 @@ Useful log markers to watch:
 - `[SELL SENT]`
 - `[TPSL CHECK]`
 - `[TPSL TRIGGER]`
-- `[GROQ REFRESH]`
+- `[LLM REFRESH]`
 - `[AI THRESHOLD]`
 
 ## Development Notes
