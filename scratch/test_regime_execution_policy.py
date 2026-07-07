@@ -1,4 +1,5 @@
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -255,10 +256,18 @@ def test_exit_signal_without_position_is_hold():
     assert reason == "policy_block_exit_without_position"
 
 
-def test_small_loss_blocked_by_exit_gate():
+def test_small_loss_blocked_by_exit_gate(monkeypatch):
     # YENİ SÖZLEŞME: küçük zarar (INDICATOR_EXIT_MIN_LOSS_PCT=%0.8 altı) indicator exit'i bloklar.
     # Veri: ifc %7 win rate → küçük zararda çıkış, komisyon + slippage = net kayıp.
     # Beklenti: HOLD (exit gate devrede); büyük zararda veya olumsuz rejimde gerçek exit gelir.
+    import config.settings as settings_module
+
+    monkeypatch.setattr(
+        settings_module,
+        "settings",
+        replace(settings_module.settings, indicator_exit_min_loss_pct=0.008),
+    )
+
     adjusted, reason = apply_regime_execution_policy(
         signal={"action": "PARTIAL_CLOSE", "fraction": 0.5, "stance": "SELL"},
         score=-4.5,
