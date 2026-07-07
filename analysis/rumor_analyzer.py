@@ -31,6 +31,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, Literal
+from urllib.parse import quote
 
 import requests
 
@@ -39,6 +40,8 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+BEDROCK_DEFAULT_MODEL = "us.anthropic.claude-sonnet-4-6"
+BEDROCK_DEFAULT_REGION = "us-east-1"
 COINGECKO_PRO_BASE_URL = "https://pro-api.coingecko.com/api/v3"
 COINGECKO_DEMO_BASE_URL = "https://api.coingecko.com/api/v3"
 COINGECKO_NEWS_PATH = "/news"
@@ -69,7 +72,10 @@ def _dedupe_models(models: list[str]) -> list[str]:
 
 # TR: Bu iki TTL artik .env uzerinden yonetiliyor. Kod degistirmeden AI refresh araligini ayarlayabilirsin.
 # EN: These two TTL values are now controlled through `.env`, so AI refresh cadence can be changed without editing code.
-GROQ_CACHE_TTL_SECONDS = max(0, int(getattr(settings, "groq_cache_ttl_seconds", 10 * 60 * 60) or 0))
+LLM_CACHE_TTL_SECONDS = max(
+    0,
+    int(getattr(settings, "llm_cache_ttl_seconds", getattr(settings, "groq_cache_ttl_seconds", 10 * 60 * 60)) or 0),
+)
 THRESHOLD_UPDATE_TTL_SECONDS = max(0, int(getattr(settings, "threshold_update_ttl_seconds", 10 * 60 * 60) or 0))
 RESEARCH_CONTEXT_TTL_SECONDS = 30 * 60
 EXA_TIMEOUT_SECONDS = 20
@@ -88,69 +94,50 @@ STANCE_DEFAULT_SCORES = {
 }
 VALID_STANCES = set(STANCE_DEFAULT_SCORES.keys())
 
-GROQ_SINGLE_SYMBOL_SYSTEM_PROMPT = """You are a crypto trading master economist.
-Return ONLY valid JSON with this exact schema:
+LLM_SINGLE_SYMBOL_SYSTEM_PROMPT = """You are a crypto news-flow and sentiment analyst. Judge exactly one symbol using only the supplied context.
+
+Return ONLY one valid JSON object with this exact schema — no markdown, no prose before or after:
 {"stance":"STRONG_BUY|BUY|HOLD|SELL|STRONG_SELL","score":0,"confidence":0.0,"reasoning":"brief explanation"}
-Rules:
-- Do not say "generic news". If there is no meaningful catalyst, say "no clear asset-specific catalyst".
-- HOLD is for balanced or unclear setups; it is not the default answer for every weak-context case.
-- If the supplied context clearly leans bullish or bearish, mild BUY or SELL is acceptable.
-- Do not invent technical levels, support, resistance, or breakout states unless they are explicitly present in the supplied context.
-- Use the full score band intelligently. Do not default to the same score for every stance.
-Do not wrap JSON in markdown. Do not add any prose before or after the JSON.
+
+Field contract:
+- score: integer in -24..+24, and it must agree with stance:
+  HOLD -4..+4 | BUY +5..+14 | SELL -14..-5 | STRONG_BUY +15..+18 | STRONG_SELL -18..-15.
+  Magnitudes 19-24 are rare: only for a fresh asset-specific catalyst confirmed by price context, with high confidence.
+- confidence: 0.00-1.00 — 0.40-0.55 thin or ambiguous evidence, 0.55-0.75 solid evidence, 0.75-0.90 strong multi-signal agreement. Never 0.0 unless the context is empty.
+- reasoning: one short sentence (max 20 words) naming the decisive, symbol-specific fact. Never vague fillers such as "generic news".
+
+Judgment rules:
+- Use only the supplied context. Do not invent technical levels, support, resistance, price action, or breakout states.
+- If there is no meaningful catalyst, write exactly "no clear asset-specific catalyst" in reasoning, judge from the remaining price context, and keep score within -8..+2.
+- HOLD is for genuinely balanced or unclear evidence, not the default answer for weak context; a clear lean deserves mild BUY or SELL.
+- Pick the exact score by conviction inside the band; do not reuse a fixed default number per stance.
 """
 
-GROQ_BULK_SYSTEM_PROMPT = """You are a crypto market strategist focused on news flow and price action.
-You will receive multiple symbols with:
-- news and catalyst context,
-- raw price action structure,
-- nearby support/resistance zones,
-- Fibonacci retracement lines,
-- breakout or rejection state.
+LLM_BULK_SYSTEM_PROMPT = """You are a crypto market strategist judging news flow plus raw price action for multiple symbols.
 
-Base your judgment on news plus price action only.
-Do NOT rely on indicator-style logic such as RSI, MACD, EMA, or ADX because the technical indicator engine is handled elsewhere.
+Each symbol block may contain: news/catalyst context (NEWS) and raw price-action structure (PRICE_ACTION) with support/resistance zones, Fibonacci retracement lines, and breakout or rejection state. Fields can be missing; judge only from what is supplied.
 
-Prefer reasoning such as:
-- bullish news while price is reclaiming support or compressing under resistance,
-- bearish news while price is rejecting resistance or losing support,
-- whether price sits near fib support, fib resistance, swing high, or swing low,
-- whether the move looks like breakout continuation or exhaustion/rejection.
+Method:
+- Base every call on news + price action only. Do NOT use indicator-style logic (RSI, MACD, EMA, ADX) — a separate engine handles indicators.
+- Strong setups pair a catalyst with confirming structure: bullish news while price reclaims support or compresses under resistance; bearish news while price rejects resistance or loses support; breakout continuation versus exhaustion/rejection; position versus fib and swing levels.
+- Broad-market or Bitcoin-led news applies to another symbol only if that symbol's own price action confirms it.
+- Mixed or contradictory evidence stays near neutral. Clearly weak structure justifies mild SELL on neutral news; clearly constructive structure justifies mild BUY.
 
-Reasoning quality rules:
-- Do not use vague boilerplate such as "generic news" by itself.
-- If there is no meaningful asset-specific catalyst, explicitly say "no clear asset-specific catalyst" and then rely on price action.
-- Do not copy the same explanation across symbols. Mention the most decisive symbol-specific detail.
-- A short reason is good, but it must still say what is unique about that symbol.
+Scoring (integer -24..+24, must agree with stance):
+- HOLD -4..+4: balanced or genuinely unclear evidence only — not a default.
+- BUY +5..+14 / SELL -14..-5: clear directional lean.
+- STRONG_BUY +15..+18 / STRONG_SELL -18..-15: catalyst plus clear structural confirmation.
+- Magnitudes 19-24 are rare and require ALL of: fresh asset-specific catalyst; price action confirming it via breakout, breakdown, strong reclaim, or clear loss of a major level; aligned support/resistance or Fibonacci context; high confidence.
+- Being near a level without a confirmed break is never a strong score. Compression, chop, or range without breakout stays between HOLD and a mild bias.
+- Choose the exact number by conviction inside the band: two symbols with different conviction get different scores; do not collapse every HOLD to one value.
 
-Score discipline is critical. Do not use extreme scores casually.
-- HOLD scores should usually stay between -4 and 4.
-- BUY or SELL scores should usually stay between 5 and 14 in absolute value.
-- STRONG_BUY or STRONG_SELL scores should usually stay between 15 and 18 in absolute value.
-- Scores from 19 to 24 are rare and must be reserved for exceptional conviction only.
+Confidence (0.00-1.00): 0.40-0.55 thin or price-action-only evidence, 0.55-0.75 solid catalyst or clear structure, 0.75-0.90 catalyst and structure agreeing. Never 0.0 unless a block has no usable information.
 
-Use 19..24 only if ALL of the following are true:
-- there is a fresh and meaningful asset-specific catalyst,
-- price action clearly confirms it with breakout, breakdown, strong reclaim, or clear loss of a major level,
-- support/resistance or Fibonacci context strongly aligns with the catalyst,
-- confidence is high.
+Reasoning: max 12 words, naming the decisive symbol-specific fact — never vague fillers such as "generic news". If there is no catalyst, write exactly "no clear asset-specific catalyst" plus the price-action basis, and keep score within -8..+2.
 
-Important guardrails:
-- Being near support or resistance alone is not enough for a strong score.
-- Compression, chop, or range behavior without confirmed breakout/breakdown should usually stay between HOLD and a mild directional bias.
-- Broad market or Bitcoin-led news must not be transferred aggressively to unrelated symbols unless that symbol's own price action confirms it.
-- Mixed evidence should stay near neutral.
-- If news is weak, stale, generic, or not asset-specific, avoid extreme scores.
-- HOLD should be used for balanced or unclear setups, not as the default answer for every low-news setup.
-- If price structure is clearly weak, mild SELL is acceptable even when the news is neutral.
-- If price structure is clearly constructive, mild BUY is acceptable even when the news is neutral.
-- Use the score bands flexibly. Do not collapse every HOLD to the same small negative score.
-- If two symbols have different conviction, their scores should usually differ.
-- Choose the score based on conviction intensity inside the band, not from a fixed per-stance default.
-
-Return ONLY a valid JSON array. Each item MUST follow this exact schema:
+Return ONLY a valid JSON array — no markdown, no commentary. Each item MUST follow this exact schema:
 {"symbol":"BTC/USDT","stance":"STRONG_BUY|BUY|HOLD|SELL|STRONG_SELL","score":0,"confidence":0.0,"reasoning":"brief explanation"}
-Do not wrap JSON in markdown. Do not add commentary. Do not omit symbols.
+Exactly one item per supplied symbol, in the same order, echoing each symbol string exactly as given. Never omit or add symbols. Keep every reasoning short so the complete array always fits in the response.
 """
 
 GROQ_THRESHOLD_SYSTEM_PROMPT = """You are a trading parameter optimizer.
@@ -169,8 +156,8 @@ class ProviderResult:
     raw: dict[str, Any]
 
 
-_groq_cache: dict[str, tuple[float, ProviderResult]] = {}
-_groq_last_refresh: float = 0.0
+_llm_cache: dict[str, tuple[float, ProviderResult]] = {}
+_llm_last_refresh: float = 0.0
 _threshold_last_update: float = 0.0
 _research_context_cache: dict[str, tuple[float, str]] = {}
 _coingecko_news_cache: dict[str, tuple[float, str]] = {}
@@ -197,15 +184,15 @@ def get_last_llm_models() -> dict[str, str]:
 def clear_refresh_state(clear_cache: bool = True) -> None:
     """
     Force refresh akışı için tüm refresh zamanlayıcılarını sıfırlar.
-    clear_cache=True ise Groq + araştırma cache'leri de temizlenir.
+    clear_cache=True ise LLM + araştırma cache'leri de temizlenir.
     """
-    global _groq_last_refresh, _threshold_last_update, _last_bulk_refresh_model, _last_threshold_update_model
-    _groq_last_refresh = 0.0
+    global _llm_last_refresh, _threshold_last_update, _last_bulk_refresh_model, _last_threshold_update_model
+    _llm_last_refresh = 0.0
     _threshold_last_update = 0.0
     _last_bulk_refresh_model = ""
     _last_threshold_update_model = ""
     if clear_cache:
-        _groq_cache.clear()
+        _llm_cache.clear()
         _research_context_cache.clear()
         _coingecko_news_cache.clear()
         _exa_news_cache.clear()
@@ -216,6 +203,15 @@ class BaseProvider:
 
     def is_enabled(self) -> bool:
         return False
+
+    def _request_parsed(
+        self,
+        payload: dict[str, Any],
+        timeout_seconds: int,
+        expect: Literal["object", "array"],
+        context_label: str,
+    ) -> tuple[dict[str, Any] | list[Any] | None, str | None, str | None]:
+        return None, None, None
 
     def analyze(self, symbol: str) -> ProviderResult | None:
         return None
@@ -238,6 +234,150 @@ class DisabledProvider(BaseProvider):
 
     def analyze(self, symbol: str) -> ProviderResult | None:
         return self._neutral(symbol, "provider disabled or missing key")
+
+
+class BedrockProvider(BaseProvider):
+    name = "bedrock"
+
+    def __init__(
+        self,
+        api_key: str = "",
+        model: str = BEDROCK_DEFAULT_MODEL,
+        region: str = BEDROCK_DEFAULT_REGION,
+    ):
+        self.api_key = api_key
+        self.model = model.strip() if model else BEDROCK_DEFAULT_MODEL
+        self.region = region.strip() if region else BEDROCK_DEFAULT_REGION
+        self.cache_namespace = f"{self.name}:{self.region}:{self.model}"
+
+    def is_enabled(self) -> bool:
+        return bool(self.api_key and self.api_key.strip() and self.model and self.region)
+
+    def _converse_url(self) -> str:
+        encoded_model = quote(self.model, safe="")
+        return f"https://bedrock-runtime.{self.region}.amazonaws.com/model/{encoded_model}/converse"
+
+    def _make_request_single(self, payload: dict[str, Any], timeout_seconds: int = 30) -> dict[str, Any] | None:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        body = _build_bedrock_converse_payload(payload)
+
+        for attempt in range(3):
+            try:
+                response = requests.post(
+                    self._converse_url(),
+                    headers=headers,
+                    json=body,
+                    timeout=timeout_seconds,
+                )
+            except requests.Timeout:
+                logger.warning("[BEDROCK] Request timeout, retrying... (attempt %d/3)", attempt + 1)
+                time.sleep(3 * (attempt + 1))
+                continue
+            except Exception as exc:
+                logger.warning("[BEDROCK] Request error: %s", exc)
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                return None
+
+            if response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", 30))
+                logger.warning("[BEDROCK] Rate limited, waiting %ds (attempt %d/3)", retry_after, attempt + 1)
+                time.sleep(min(retry_after, 90))
+                continue
+
+            if response.status_code >= 500:
+                logger.warning("[BEDROCK] Server error %s, retrying... (attempt %d/3)", response.status_code, attempt + 1)
+                time.sleep(3 * (attempt + 1))
+                continue
+
+            if response.status_code != 200:
+                logger.warning("[BEDROCK] API error: %s %s", response.status_code, response.text)
+                return None
+
+            try:
+                return response.json()
+            except Exception as exc:
+                logger.warning("[BEDROCK] Response JSON decode failed: %s", exc)
+                return None
+
+        return None
+
+    def _request_parsed(
+        self,
+        payload: dict[str, Any],
+        timeout_seconds: int,
+        expect: Literal["object", "array"],
+        context_label: str,
+    ) -> tuple[dict[str, Any] | list[Any] | None, str | None, str | None]:
+        logger.info("[BEDROCK MODEL] %s model=%s region=%s", context_label, self.model, self.region)
+        data = self._make_request_single(payload, timeout_seconds=timeout_seconds)
+        if data is None:
+            return None, None, None
+
+        content = _extract_bedrock_converse_text(data)
+        try:
+            parsed = _parse_json_response(content, expect=expect)
+            return parsed, self.model, content
+        except ValueError as exc:
+            logger.warning(
+                "[BEDROCK PARSE FAIL] %s model=%s expect=%s err=%s content_preview=%s",
+                context_label,
+                self.model,
+                expect,
+                exc,
+                (content or "")[:300],
+            )
+            return None, None, content
+
+    def analyze(self, symbol: str) -> ProviderResult | None:
+        if not self.is_enabled():
+            return self._neutral(symbol, "bedrock bearer token not configured")
+
+        cache_key = _llm_cache_key(self.cache_namespace, symbol)
+        now = time.time()
+
+        cached = _llm_cache.get(cache_key)
+        if cached and now - cached[0] < LLM_CACHE_TTL_SECONDS:
+            logger.debug("[BEDROCK CACHE HIT] %s", symbol)
+            return cached[1]
+
+        context_text = build_symbol_research_context(symbol)
+        user_prompt = f"""Analyze market sentiment for {symbol}.
+Use only the RESEARCH CONTEXT below. Do not invent prices, levels, support, resistance, price action, or breakout details that are not explicitly in it.
+If the context contains no meaningful asset-specific catalyst, write exactly "no clear asset-specific catalyst" in reasoning and keep the score small.
+Return only the JSON object defined by the schema — no markdown, no extra text.
+
+RESEARCH CONTEXT:
+{context_text or 'No external research context available.'}
+"""
+
+        payload = {
+            "messages": [
+                {"role": "system", "content": LLM_SINGLE_SYMBOL_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 220,
+        }
+
+        logger.info("[BEDROCK API CALL] %s", symbol)
+        parsed, used_model, _ = self._request_parsed(
+            payload,
+            timeout_seconds=30,
+            expect="object",
+            context_label=f"analyze:{symbol}",
+        )
+        if parsed is None or used_model is None or not isinstance(parsed, dict):
+            return self._neutral(symbol, "bedrock api error")
+
+        result = _provider_result_from_payload(self.name, symbol, parsed, used_model)
+        _llm_cache[cache_key] = (now, result)
+        logger.info("[BEDROCK CACHED] %s for %d seconds model=%s", symbol, LLM_CACHE_TTL_SECONDS, used_model)
+        return result
 
 
 class GroqProvider(BaseProvider):
@@ -374,11 +514,11 @@ class GroqProvider(BaseProvider):
         if not self.is_enabled():
             return self._neutral(symbol, "groq api key not configured")
 
-        cache_key = _groq_cache_key(self.cache_namespace, symbol)
+        cache_key = _llm_cache_key(self.cache_namespace, symbol)
         now = time.time()
 
-        cached = _groq_cache.get(cache_key)
-        if cached and now - cached[0] < GROQ_CACHE_TTL_SECONDS:
+        cached = _llm_cache.get(cache_key)
+        if cached and now - cached[0] < LLM_CACHE_TTL_SECONDS:
             logger.debug("[GROQ CACHE HIT] %s", symbol)
             return cached[1]
 
@@ -387,9 +527,9 @@ class GroqProvider(BaseProvider):
 
         context_text = build_symbol_research_context(symbol)
         user_prompt = f"""Analyze market sentiment for {symbol}.
-Use only the supplied context.
-Do not invent support, resistance, price action, or breakout details unless they explicitly appear in the context.
-If there is no meaningful catalyst, say "no clear asset-specific catalyst".
+Use only the RESEARCH CONTEXT below. Do not invent prices, levels, support, resistance, price action, or breakout details that are not explicitly in it.
+If the context contains no meaningful asset-specific catalyst, write exactly "no clear asset-specific catalyst" in reasoning and keep the score small.
+Return only the JSON object defined by the schema — no markdown, no extra text.
 
 RESEARCH CONTEXT:
 {context_text or 'No external research context available.'}
@@ -397,7 +537,7 @@ RESEARCH CONTEXT:
 
         payload = {
             "messages": [
-                {"role": "system", "content": GROQ_SINGLE_SYMBOL_SYSTEM_PROMPT},
+                {"role": "system", "content": LLM_SINGLE_SYMBOL_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.2,
@@ -415,18 +555,95 @@ RESEARCH CONTEXT:
             return self._neutral(symbol, "groq api error")
 
         result = _provider_result_from_payload(self.name, symbol, parsed, used_model)
-        _groq_cache[cache_key] = (now, result)
-        logger.info("[GROQ CACHED] %s for %d seconds model=%s", symbol, GROQ_CACHE_TTL_SECONDS, used_model)
+        _llm_cache[cache_key] = (now, result)
+        logger.info("[GROQ CACHED] %s for %d seconds model=%s", symbol, LLM_CACHE_TTL_SECONDS, used_model)
         return result
 
 
-def _groq_cache_key(model: str, symbol: str) -> str:
+def _llm_cache_key(model: str, symbol: str) -> str:
     return f"{model}:{symbol.upper()}"
 
 
 def _extract_choice_content(data: dict[str, Any]) -> str:
     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
     return str(content or "").strip()
+
+
+def _build_bedrock_converse_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    system_parts: list[str] = []
+    converse_messages: list[dict[str, Any]] = []
+
+    for message in payload.get("messages", []) or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user").strip().lower()
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(content)
+            continue
+        if role not in {"user", "assistant"}:
+            role = "user"
+        converse_messages.append({
+            "role": role,
+            "content": [{"text": content}],
+        })
+
+    if not converse_messages:
+        converse_messages.append({
+            "role": "user",
+            "content": [{"text": "Return valid JSON."}],
+        })
+
+    body: dict[str, Any] = {
+        "messages": converse_messages,
+        "inferenceConfig": {
+            "maxTokens": int(payload.get("max_tokens") or 1024),
+            "temperature": float(payload.get("temperature") or 0.0),
+        },
+    }
+    if system_parts:
+        body["system"] = [{"text": "\n\n".join(system_parts)}]
+    return body
+
+
+def _extract_bedrock_converse_text(data: dict[str, Any]) -> str:
+    output_message = (data.get("output") or {}).get("message")
+    if isinstance(output_message, dict):
+        content = output_message.get("content")
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and item.get("text") is not None:
+                    parts.append(str(item.get("text") or ""))
+            return "".join(parts).strip()
+
+    content = data.get("content")
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text") or ""))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts).strip()
+    if isinstance(data.get("completion"), str):
+        return str(data.get("completion") or "").strip()
+    if isinstance(data.get("output_text"), str):
+        return str(data.get("output_text") or "").strip()
+    return ""
+
+
+def _provider_display_name(provider: Any) -> str:
+    return str(getattr(provider, "name", provider.__class__.__name__.lower()) or "llm")
+
+
+def _provider_model_label(provider: Any, model: str) -> str:
+    provider_name = _provider_display_name(provider)
+    if str(model).startswith(f"{provider_name}:"):
+        return str(model)
+    return f"{provider_name}:{model}"
 
 
 def _strip_code_fences(content: str) -> str:
@@ -981,14 +1198,56 @@ def build_symbol_research_context(symbol: str) -> str:
     return context
 
 
+def _provider_order() -> list[str]:
+    raw = _setting_str("llm_provider_order")
+    if not raw:
+        raw = "groq"
+    names = [item.strip().lower() for item in raw.split(",")]
+    return _dedupe_models(names)
+
+
+def _provider_is_enabled(provider: Any) -> bool:
+    is_enabled = getattr(provider, "is_enabled", None)
+    if callable(is_enabled):
+        try:
+            return bool(is_enabled())
+        except Exception as exc:
+            logger.warning("[LLM PROVIDER] enabled check failed provider=%s err=%s", _provider_display_name(provider), exc)
+            return False
+    return True
+
+
+def _build_provider(provider_name: str) -> BaseProvider | None:
+    if provider_name == "bedrock":
+        api_key = _setting_str("aws_bearer_token_bedrock", "bedrock_api_key")
+        if not api_key:
+            return None
+        return BedrockProvider(
+            api_key=api_key,
+            model=_setting_str("bedrock_model") or BEDROCK_DEFAULT_MODEL,
+            region=_setting_str("bedrock_region", "aws_region", "aws_default_region") or BEDROCK_DEFAULT_REGION,
+        )
+
+    if provider_name == "groq":
+        groq_api_key = _setting_str("groq_api_key")
+        if not groq_api_key:
+            return None
+        return GroqProvider(
+            api_key=groq_api_key,
+            model=_setting_str("groq_model") or "llama-3.3-70b-versatile",
+        )
+
+    logger.warning("[LLM PROVIDER] unknown provider in LLM_PROVIDER_ORDER: %s", provider_name)
+    return None
+
+
 def build_provider_list() -> list[BaseProvider]:
     providers: list[BaseProvider] = []
 
-    if settings.groq_api_key:
-        providers.append(GroqProvider(
-            api_key=settings.groq_api_key,
-            model=settings.groq_model or "llama-3.3-70b-versatile",
-        ))
+    for provider_name in _provider_order():
+        provider = _build_provider(provider_name)
+        if provider and _provider_is_enabled(provider):
+            providers.append(provider)
 
     if not providers:
         providers.append(DisabledProvider("no_provider"))
@@ -996,20 +1255,83 @@ def build_provider_list() -> list[BaseProvider]:
     return providers
 
 
+def has_configured_llm_provider() -> bool:
+    return any(provider.name != "no_provider" and _provider_is_enabled(provider) for provider in build_provider_list())
+
+
+def _provider_result_is_failure(result: ProviderResult) -> bool:
+    raw = result.raw or {}
+    if raw.get("disabled") or raw.get("error"):
+        return True
+    summary = str(result.summary or "").lower()
+    failure_markers = (
+        "api error",
+        "not configured",
+        "missing key",
+        "provider disabled",
+        "cache miss after refresh",
+        "request error",
+    )
+    return any(marker in summary for marker in failure_markers)
+
+
+def _request_parsed_with_provider_fallback(
+    payload: dict[str, Any],
+    timeout_seconds: int,
+    expect: Literal["object", "array"],
+    context_label: str,
+) -> tuple[BaseProvider | None, dict[str, Any] | list[Any] | None, str | None, str | None]:
+    providers = [provider for provider in build_provider_list() if provider.name != "no_provider"]
+    if not providers:
+        logger.info("[LLM PROVIDER] %s skipped: no provider configured", context_label)
+        return None, None, None, None
+
+    last_content: str | None = None
+    for idx, provider in enumerate(providers):
+        provider_name = _provider_display_name(provider)
+        if idx == 0:
+            logger.info("[LLM PROVIDER] %s using provider=%s", context_label, provider_name)
+        else:
+            logger.warning("[LLM PROVIDER FALLBACK] %s trying provider=%s", context_label, provider_name)
+
+        parsed, used_model, content = provider._request_parsed(
+            payload,
+            timeout_seconds=timeout_seconds,
+            expect=expect,
+            context_label=context_label,
+        )
+        last_content = content or last_content
+        if parsed is not None and used_model is not None:
+            return provider, parsed, used_model, content
+
+        logger.warning(
+            "[LLM PROVIDER FAIL] %s provider=%s content_preview=%s",
+            context_label,
+            provider_name,
+            (content or "")[:300] if content else "empty",
+        )
+
+    return None, None, None, last_content
+
+
 def aggregate_rumor(symbol: str) -> dict[str, Any]:
     providers = build_provider_list()
     items: list[ProviderResult] = []
+    failed_items: list[ProviderResult] = []
 
     for provider in providers:
         try:
             result = provider.analyze(symbol)
-            if result:
+            if result and not _provider_result_is_failure(result):
                 items.append(result)
+                break
+            if result:
+                failed_items.append(result)
         except Exception as exc:
-            logger.exception("[RUMOR] provider=%s symbol=%s error=%s", provider.name, symbol, exc)
-            items.append(
+            logger.exception("[RUMOR] provider=%s symbol=%s error=%s", _provider_display_name(provider), symbol, exc)
+            failed_items.append(
                 ProviderResult(
-                    provider=provider.name,
+                    provider=_provider_display_name(provider),
                     symbol=symbol,
                     stance="HOLD",
                     rumor_score=0,
@@ -1018,6 +1340,10 @@ def aggregate_rumor(symbol: str) -> dict[str, Any]:
                     raw={"error": str(exc)},
                 )
             )
+            continue
+
+    if not items and failed_items:
+        items.append(failed_items[-1])
 
     # TR: AI tarafi provider sayisi arttikca sismesin diye toplam degil ortalama kullaniyoruz.
     # EN: We use the average instead of the sum so the AI side does not inflate when provider count grows.
@@ -1048,30 +1374,25 @@ def refresh_all_if_needed(
     force: bool = False,
 ) -> bool:
     """
-    TTL dolduysa veya force=True ise tüm semboller için Groq'a toplu istek atar.
+    TTL dolduysa veya force=True ise tüm semboller için seçili LLM provider'a toplu istek atar.
     Exa + CoinGecko + market data bağlamı tek promptta verilir.
     """
-    global _groq_last_refresh, _last_bulk_refresh_model
+    global _llm_last_refresh, _last_bulk_refresh_model
     now = time.time()
 
-    if not force and now - _groq_last_refresh < GROQ_CACHE_TTL_SECONDS:
+    if not force and now - _llm_last_refresh < LLM_CACHE_TTL_SECONDS:
         return False
 
-    provider = GroqProvider(
-        api_key=settings.groq_api_key,
-        model=settings.groq_model or "llama-3.3-70b-versatile",
-    ) if settings.groq_api_key else None
-
-    if not provider:
-        logger.info("[GROQ REFRESH] skipped: provider not configured")
+    if not has_configured_llm_provider():
+        logger.info("[LLM REFRESH] skipped: provider not configured")
         return False
 
     if not symbols:
-        logger.info("[GROQ REFRESH] skipped: empty symbol list")
+        logger.info("[LLM REFRESH] skipped: empty symbol list")
         return False
 
     refresh_reason = "forced" if force else "ttl_expired"
-    logger.info("[GROQ REFRESH] starting (%s) for %d symbols", refresh_reason, len(symbols))
+    logger.info("[LLM REFRESH] starting (%s) for %d symbols", refresh_reason, len(symbols))
 
     context_lines: list[str] = []
     per_symbol_context_limit = int(getattr(settings, "bulk_refresh_max_context_chars_per_symbol", 260) or 260)
@@ -1088,17 +1409,17 @@ def refresh_all_if_needed(
         symbol_lines.append(f"NEWS={_compact_text(research_context or 'none', news_context_limit)}")
         context_lines.append(_compact_context_lines(symbol_lines, per_line_limit=160, total_limit=per_symbol_context_limit))
 
-    user_prompt = """Return a JSON array with one item per symbol.
-Use only the supplied context. Keep reasoning very short and symbol-specific.
-If there is no real catalyst, say "no clear asset-specific catalyst".
-Stay conservative unless news and price action confirm each other.
-Weak news with clearly weak/constructive structure may be mild SELL/BUY.
-Range/compression without confirmation should stay near HOLD.
+    user_prompt = """Score every symbol block below and return one JSON array item per block.
+Use only the supplied SYMBOL / PRICE_ACTION / NEWS lines. Keep each reasoning under 12 words and symbol-specific.
+If NEWS contains no real catalyst, judge from PRICE_ACTION alone: state "no clear asset-specific catalyst", keep score within -8..+2, and set confidence 0.40-0.65.
+Only return score=0 with HOLD when price action is genuinely ambiguous — absence of news alone is not HOLD.
+Confidence must always be meaningful; never 0.0 unless a block has no usable information.
+Echo each symbol exactly as written, keep the input order, and include every symbol exactly once.
 
 """ + "\n\n".join(context_lines)
 
     logger.info(
-        "[GROQ REFRESH] prompt_budget symbols=%d chars=%d per_symbol_limit=%d news_limit=%d",
+        "[LLM REFRESH] prompt_budget symbols=%d chars=%d per_symbol_limit=%d news_limit=%d",
         len(symbols),
         len(user_prompt),
         per_symbol_context_limit,
@@ -1107,27 +1428,29 @@ Range/compression without confirmation should stay near HOLD.
 
     payload = {
         "messages": [
-            {"role": "system", "content": GROQ_BULK_SYSTEM_PROMPT},
+            {"role": "system", "content": LLM_BULK_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.2,
         "max_tokens": 1200,
     }
 
-    parsed, used_model, content = provider._request_parsed(
+    provider, parsed, used_model, content = _request_parsed_with_provider_fallback(
         payload,
         timeout_seconds=35,
         expect="array",
         context_label="bulk_refresh",
     )
-    if parsed is None or used_model is None:
-        logger.warning("[GROQ REFRESH] all models failed. Content preview: %s", (content or "")[:500] if content else "empty")
+    if provider is None or parsed is None or used_model is None:
+        logger.warning("[LLM REFRESH] all providers failed. Content preview: %s", (content or "")[:500] if content else "empty")
         return False
 
     if not isinstance(parsed, list):
-        logger.warning("[GROQ REFRESH] parsed payload is not a list")
+        logger.warning("[LLM REFRESH] parsed payload is not a list")
         return False
 
+    provider_name = _provider_display_name(provider)
+    provider_namespace = str(getattr(provider, "cache_namespace", f"{provider_name}:{used_model}"))
     cached_count = 0
     refreshed_at = time.time()
     for item in parsed:
@@ -1136,18 +1459,18 @@ Range/compression without confirmation should stay near HOLD.
         resolved_symbol = _resolve_symbol_from_payload(item.get("symbol"), symbols)
         if not resolved_symbol:
             continue
-        cache_key = _groq_cache_key(provider.cache_namespace, resolved_symbol)
-        result = _provider_result_from_payload("groq", resolved_symbol, item, used_model)
-        _groq_cache[cache_key] = (refreshed_at, result)
+        cache_key = _llm_cache_key(provider_namespace, resolved_symbol)
+        result = _provider_result_from_payload(provider_name, resolved_symbol, item, used_model)
+        _llm_cache[cache_key] = (refreshed_at, result)
         cached_count += 1
 
     if cached_count == 0:
-        logger.warning("[GROQ REFRESH] parsed response but cached 0 symbols")
+        logger.warning("[LLM REFRESH] parsed response but cached 0 symbols")
         return False
 
-    _groq_last_refresh = refreshed_at
-    _last_bulk_refresh_model = used_model
-    logger.info("[GROQ REFRESH] Cached %d/%d symbols model=%s", cached_count, len(symbols), used_model)
+    _llm_last_refresh = refreshed_at
+    _last_bulk_refresh_model = _provider_model_label(provider, used_model)
+    logger.info("[LLM REFRESH] Cached %d/%d symbols model=%s", cached_count, len(symbols), _last_bulk_refresh_model)
     return True
 
 
@@ -1174,17 +1497,12 @@ def update_thresholds_if_needed(
     if not force and now - _threshold_last_update < THRESHOLD_UPDATE_TTL_SECONDS:
         return None
 
-    if not settings.groq_api_key:
-        logger.info("[AI THRESHOLD] skipped: groq api key not configured")
+    if not has_configured_llm_provider():
+        logger.info("[AI THRESHOLD] skipped: llm provider not configured")
         return None
 
     refresh_reason = "forced" if force else "ttl_expired"
     logger.info("[AI THRESHOLD] starting (%s)", refresh_reason)
-
-    provider = GroqProvider(
-        api_key=settings.groq_api_key,
-        model=settings.groq_model or "llama-3.3-70b-versatile",
-    )
 
     threshold_symbol_cap = max(1, int(getattr(settings, "threshold_snapshot_max_symbols", 5) or 5))
     ranked_symbols = sorted(
@@ -1264,14 +1582,14 @@ Return ONLY JSON with these keys:
         "max_tokens": 400,
     }
 
-    parsed, used_model, content = provider._request_parsed(
+    provider, parsed, used_model, content = _request_parsed_with_provider_fallback(
         payload,
         timeout_seconds=20,
         expect="object",
         context_label="threshold_update",
     )
-    if parsed is None or used_model is None or not isinstance(parsed, dict):
-        logger.warning("[AI THRESHOLD] all models failed. Content: %s", content[:500] if content else "empty")
+    if provider is None or parsed is None or used_model is None or not isinstance(parsed, dict):
+        logger.warning("[AI THRESHOLD] all providers failed. Content: %s", content[:500] if content else "empty")
         return None
 
     updated_at = time.time()
@@ -1292,6 +1610,6 @@ Return ONLY JSON with these keys:
     result["strong_buy_pct"] = max(result["strong_buy_pct"], result["buy_pct"])
 
     _threshold_last_update = updated_at
-    _last_threshold_update_model = used_model
-    logger.info("[AI THRESHOLD] Updated model=%s: %s", used_model, {k: v for k, v in result.items() if k != "reasoning"})
+    _last_threshold_update_model = _provider_model_label(provider, used_model)
+    logger.info("[AI THRESHOLD] Updated model=%s: %s", _last_threshold_update_model, {k: v for k, v in result.items() if k != "reasoning"})
     return result

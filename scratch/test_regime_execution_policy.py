@@ -255,7 +255,10 @@ def test_exit_signal_without_position_is_hold():
     assert reason == "policy_block_exit_without_position"
 
 
-def test_any_losing_partial_close_promotes_to_full_close():
+def test_small_loss_blocked_by_exit_gate():
+    # YENİ SÖZLEŞME: küçük zarar (INDICATOR_EXIT_MIN_LOSS_PCT=%0.8 altı) indicator exit'i bloklar.
+    # Veri: ifc %7 win rate → küçük zararda çıkış, komisyon + slippage = net kayıp.
+    # Beklenti: HOLD (exit gate devrede); büyük zararda veya olumsuz rejimde gerçek exit gelir.
     adjusted, reason = apply_regime_execution_policy(
         signal={"action": "PARTIAL_CLOSE", "fraction": 0.5, "stance": "SELL"},
         score=-4.5,
@@ -270,15 +273,17 @@ def test_any_losing_partial_close_promotes_to_full_close():
         },
         regime_diag={"regime": "RANGE", "trend_bias": "FLAT"},
         has_position=True,
-        position_pnl_pct=-0.001,
+        position_pnl_pct=-0.001,  # %0.1 zarar — exit_min_loss_pct=%0.8 eşiğinin üstünde
     )
 
-    assert adjusted["action"] == "FULL_CLOSE"
-    assert adjusted["stance"] == "STRONG_SELL"
-    assert reason == "policy_full_close_loser"
+    assert adjusted["action"] == "HOLD"
+    assert reason == "policy_hold_small_loss_within_gate"
 
 
-def test_profitable_partial_close_remains_partial_close():
+def test_profitable_position_blocked_by_profit_protection():
+    # YENİ SÖZLEŞME: kârdaki pozisyon indicator exit'ten korunur, TP/trailing halleder.
+    # Veri: TP mekanizmaları %100 win rate — indikatör gürültüsüyle kesmek net kayıp.
+    # Beklenti: HOLD (profit protection devrede).
     signal = {"action": "PARTIAL_CLOSE", "fraction": 0.5, "stance": "SELL"}
 
     adjusted, reason = apply_regime_execution_policy(
@@ -295,8 +300,8 @@ def test_profitable_partial_close_remains_partial_close():
         },
         regime_diag={"regime": "RANGE", "trend_bias": "FLAT"},
         has_position=True,
-        position_pnl_pct=0.01,
+        position_pnl_pct=0.01,  # %1 kâr — profit_protection_pnl_pct=%0.5 eşiğinin üstünde
     )
 
-    assert adjusted == signal
-    assert reason == "policy_ok"
+    assert adjusted["action"] == "HOLD"
+    assert reason == "policy_protect_profit_let_tp_run"

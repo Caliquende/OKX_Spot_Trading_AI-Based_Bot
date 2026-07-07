@@ -367,6 +367,8 @@ def parse_new_cycle_symbols(summary: str) -> list[dict[str, str]]:
             current["exec"] = stripped.replace("Risk/Exec:", "", 1).strip()
         elif stripped.startswith("Why:"):
             current["why"] = stripped.replace("Why:", "", 1).strip()
+        elif stripped.startswith("AI:"):
+            current["groq"] = stripped.replace("AI:", "", 1).strip()
         elif stripped.startswith("Groq:"):
             current["groq"] = stripped.replace("Groq:", "", 1).strip()
     if current:
@@ -388,7 +390,11 @@ def parse_legacy_cycle_symbols(summary: str) -> list[dict[str, str]]:
             if "=" not in part:
                 continue
             key, value = part.split("=", 1)
-            item[key.strip()] = value.strip()
+            clean_key = key.strip()
+            if clean_key.startswith("ai"):
+                item["groq"] = value.strip()
+            else:
+                item[clean_key] = value.strip()
         symbols.append(item)
     return symbols
 
@@ -684,7 +690,7 @@ class BotDesktopApp(tk.Tk):
             ttk.Label(self.overview_left, text="Henüz parse edilebilir cycle kararı yok.", style="PanelMuted.TLabel").pack(anchor="w", pady=12)
         else:
             columns = ("symbol", "action", "total", "regime", "why", "exec", "groq")
-            tree = self._make_tree(self.overview_left, columns, ("Symbol", "Action", "Total", "Regime", "Why", "Exec", "Groq"))
+            tree = self._make_tree(self.overview_left, columns, ("Symbol", "Action", "Total", "Regime", "Why", "Exec", "AI"))
             for row in rows[:12]:
                 tree.insert(
                     "",
@@ -705,7 +711,7 @@ class BotDesktopApp(tk.Tk):
             ("Panic mode", "panic_mode"),
             ("Trading paused", "trading_paused"),
             ("Manual cycle requested", "manual_cycle_requested"),
-            ("Groq force refresh", "force_refresh_groq_requested"),
+            ("AI force refresh", "force_refresh_groq_requested"),
             ("Threshold force refresh", "force_refresh_thresholds_requested"),
             ("Auto risk guard", "auto_risk_guard_active"),
         ):
@@ -743,7 +749,7 @@ class BotDesktopApp(tk.Tk):
         self.signals_tree = self._make_tree(
             frame,
             ("symbol", "action", "stance", "total", "regime", "streak", "why", "exec", "groq"),
-            ("Symbol", "Action", "Stance", "Total", "Regime", "Streak", "Why", "Exec", "Groq"),
+            ("Symbol", "Action", "Stance", "Total", "Regime", "Streak", "Why", "Exec", "AI"),
         )
 
     def _render_signals(self) -> None:
@@ -921,7 +927,7 @@ class BotDesktopApp(tk.Tk):
             ("Panic mode", "panic_mode"),
             ("Trading paused", "trading_paused"),
             ("Manual cycle requested", "manual_cycle_requested"),
-            ("Force Groq refresh", "force_refresh_groq_requested"),
+            ("Force AI refresh", "force_refresh_groq_requested"),
             ("Force threshold refresh", "force_refresh_thresholds_requested"),
             ("Auto risk guard", "auto_risk_guard_active"),
         ):
@@ -931,7 +937,7 @@ class BotDesktopApp(tk.Tk):
             ttk.Label(self.control_state_frame, text=f"Auto risk reason: {reason}", style="PanelMuted.TLabel").pack(anchor="w", pady=(8, 0))
 
     def request_force_refresh(self) -> None:
-        if not messagebox.askyesno("Force refresh", "Groq sentiment, AI thresholds ve manual cycle request yazılsın mı?"):
+        if not messagebox.askyesno("Force refresh", "AI sentiment, AI thresholds ve manual cycle request yazılsın mı?"):
             return
         self.store.set_bot_state("force_refresh_groq_requested", True)
         self.store.set_bot_state("force_refresh_thresholds_requested", True)

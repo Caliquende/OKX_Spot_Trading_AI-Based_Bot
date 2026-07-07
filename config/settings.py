@@ -380,6 +380,22 @@ class Settings:
     trailing_take_profit_enabled: bool = _env_bool("TRAILING_TAKE_PROFIT_ENABLED", "true")
     trailing_take_profit_activation_pct: float = _env_float("TRAILING_TAKE_PROFIT_ACTIVATION_PCT", "0.025")
     trailing_take_profit_giveback_pct: float = _env_float("TRAILING_TAKE_PROFIT_GIVEBACK_PCT", "0.012")
+    # Early-profit korumasi (eskiden tpsl_engine icinde hardcoded 0.025/0.02 idi; full TP'yi olu kod yapiyordu).
+    # Config'e baglandi: aktivasyon partial/full TP'nin uzerine cekildi, giveback trailing ile hizalandi.
+    early_profit_activation_pct: float = _env_float("EARLY_PROFIT_ACTIVATION_PCT", "0.04")
+    early_profit_giveback_pct: float = _env_float("EARLY_PROFIT_GIVEBACK_PCT", "0.012")
+
+    # ---------------- SIGNAL CONFIRMATION ----------------
+    # Tek cevrimlik (tek mum) gurultu sinyallerini elemek icin kapanmis-mum/streak teyidi.
+    # Giris ve indicator-exit ayri ayri N ardisik teyit ister; 0 = teyit kapali (eski davranis).
+    entry_confirmation_streak: int = _env_int("ENTRY_CONFIRMATION_STREAK", "0")
+    indicator_exit_confirmation_streak: int = _env_int("INDICATOR_EXIT_CONFIRMATION_STREAK", "0")
+    # Kosulsuz `pnl < 0 -> FULL_CLOSE` yerine: sadece bu zarar esigi altinda tam kapat (rejim kapisi scoring'de).
+    loser_full_close_min_loss_pct: float = _env_float("LOSER_FULL_CLOSE_MIN_LOSS_PCT", "0.012")
+    # Karda pozisyonu indikatör gürültüsünden koru — TP/trailing halleder (veri: ifc %7 win rate).
+    profit_protection_pnl_pct: float = _env_float("PROFIT_PROTECTION_PNL_PCT", "0.005")
+    # Bu zarar eşiğinin üstündeyken indicator exit'i durdur (küçük dalgalanmayı filtrele).
+    indicator_exit_min_loss_pct: float = _env_float("INDICATOR_EXIT_MIN_LOSS_PCT", "0.0")
 
     # ---------------- REGIME ENGINE ----------------
     regime_enabled: bool = _env_bool("REGIME_ENABLED", "false")
@@ -456,10 +472,13 @@ class Settings:
 
     # ---------------- LLM CORE FLAG ----------------
     llm_enabled: bool = _env_bool("LLM_ENABLED", "false")
+    llm_provider_order: str = _env("LLM_PROVIDER_ORDER", "bedrock,groq")
 
     # ---------------- LLM API KEYS ----------------
     openai_api_key: str = _env("OPENAI_API_KEY", "")
     gemini_api_key: str = _env("GEMINI_API_KEY", "")
+    aws_bearer_token_bedrock: str = _env("AWS_BEARER_TOKEN_BEDROCK", "")
+    bedrock_api_key: str = _env("BEDROCK_API_KEY", "")
     claude_api_key: str = _env("CLAUDE_API_KEY", "")
     perplexity_api_key: str = _env("PERPLEXITY_API_KEY", "")
     groq_api_key: str = _env("GROQ_API_KEY", "")
@@ -472,6 +491,10 @@ class Settings:
     # ---------------- LLM MODELS ----------------
     openai_model: str = _env("OPENAI_MODEL", "")
     gemini_model: str = _env("GEMINI_MODEL", "")
+    bedrock_model: str = _env("BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-6")
+    bedrock_region: str = _env("BEDROCK_REGION", _env("AWS_REGION", _env("AWS_DEFAULT_REGION", "us-east-1")))
+    aws_region: str = _env("AWS_REGION", "")
+    aws_default_region: str = _env("AWS_DEFAULT_REGION", "")
     claude_model: str = _env("CLAUDE_MODEL", "")
     perplexity_model: str = _env("PERPLEXITY_MODEL", "")
     groq_model: str = _env("GROQ_MODEL", "")
@@ -479,11 +502,12 @@ class Settings:
     groq_fallback_fallback_model: str = _env("GROQ_FALLBACK_FALLBACK_MODEL", "")
     groq_fallback_fallback_fallback_model: str = _env("GROQ_FALLBACK_FALLBACK_FALLBACK_MODEL", "")
     groq_fallback_fallback_fallback_fallback_model: str = _env("GROQ_FALLBACK_FALLBACK_FALLBACK_FALLBACK_MODEL", "")
-    groq_cache_ttl_seconds: int = _env_int("GROQ_CACHE_TTL_SECONDS", "36000")
+    llm_cache_ttl_seconds: int = _env_int("LLM_CACHE_TTL_SECONDS", _env("GROQ_CACHE_TTL_SECONDS", "36000"))
+    groq_cache_ttl_seconds: int = llm_cache_ttl_seconds
     threshold_update_ttl_seconds: int = _env_int("THRESHOLD_UPDATE_TTL_SECONDS", "36000")
     research_context_max_chars: int = _env_int("RESEARCH_CONTEXT_MAX_CHARS", "500")
     bulk_refresh_max_context_chars_per_symbol: int = _env_int("BULK_REFRESH_MAX_CONTEXT_CHARS_PER_SYMBOL", "260")
-    threshold_snapshot_max_symbols: int = _env_int("THRESHOLD_SNAPSHOT_MAX_SYMBOLS", "4")
+    threshold_snapshot_max_symbols: int = _env_int("THRESHOLD_SNAPSHOT_MAX_SYMBOLS", "6")
 
     # ---------------- SIGNAL STREAK ----------------
     signal_hold_decay_after: int = _env_int("SIGNAL_HOLD_DECAY_AFTER", "2")

@@ -158,31 +158,35 @@ class TPSLEngine:
                 result.update({"triggered": True, "action": "FULL_CLOSE", "reason": "break_even_stop_hit"})
                 return result
 
-        # Early profit protection (aggressive trailing)
-        early_profit_activation_pct = 0.025
-        early_profit_giveback_pct = 0.02
-        if peak_pnl_pct >= early_profit_activation_pct:
-            if pnl_pct <= 0:
-                result.update({"triggered": True, "action": "FULL_CLOSE", "reason": "profit_roundtrip_stop_hit"})
-                return result
-            if trailing_retrace_pct >= early_profit_giveback_pct:
-                partial_tp_done = bool(state.get("partial_tp_done", False))
-                result.update({
-                    "triggered": True,
-                    "action": "FULL_CLOSE" if partial_tp_done else "PARTIAL_CLOSE",
-                    "reason": "early_trailing_profit_hit"
-                })
-                return result
+        partial_tp_done = bool(state.get("partial_tp_done", False))
 
+        # Full take-profit and partial take-profit are evaluated BEFORE the
+        # early-profit protection so the configured TP targets stay reachable.
         if bool(getattr(self.settings, "full_take_profit_enabled", True)):
             if full_take_profit_pct > 0 and trigger_high_price >= full_take_profit_price:
                 result.update({"triggered": True, "action": "FULL_CLOSE", "reason": "full_take_profit_hit"})
                 return result
 
-        partial_tp_done = bool(state.get("partial_tp_done", False))
         if bool(getattr(self.settings, "partial_take_profit_enabled", True)):
             if partial_take_profit_pct > 0 and not partial_tp_done and trigger_high_price >= partial_take_profit_price:
                 result.update({"triggered": True, "action": "PARTIAL_CLOSE", "reason": "partial_take_profit_hit"})
+                return result
+
+        # Early profit protection (aggressive trailing).
+        # Activation/giveback come from config so they can be tuned to sit
+        # above the partial TP target instead of cutting winners too early.
+        early_profit_activation_pct = float(getattr(self.settings, "early_profit_activation_pct", 0.04))
+        early_profit_giveback_pct = float(getattr(self.settings, "early_profit_giveback_pct", 0.012))
+        if peak_pnl_pct >= early_profit_activation_pct:
+            if pnl_pct <= 0:
+                result.update({"triggered": True, "action": "FULL_CLOSE", "reason": "profit_roundtrip_stop_hit"})
+                return result
+            if trailing_retrace_pct >= early_profit_giveback_pct:
+                result.update({
+                    "triggered": True,
+                    "action": "FULL_CLOSE" if partial_tp_done else "PARTIAL_CLOSE",
+                    "reason": "early_trailing_profit_hit"
+                })
                 return result
 
         if trailing_enabled and trailing_activation_pct > 0 and trailing_giveback_pct > 0:

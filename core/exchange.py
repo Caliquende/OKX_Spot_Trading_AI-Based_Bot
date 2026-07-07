@@ -56,7 +56,7 @@ class OKXExchange:
         )
         self.ex.set_sandbox_mode(sandbox)
         _debug_log(f"[INIT] sandbox={sandbox}")
-        self.ex.load_markets()
+        self._load_markets_safe()
 
         # main.py tarafında settings inject edilir.
         # Reconciler ve diğer katmanlar gerekirse buradan ayarlara bakabilir.
@@ -65,6 +65,39 @@ class OKXExchange:
 
     def now_ms(self) -> int:
         return int(time.time() * 1000)
+
+    def _load_markets_safe(self) -> None:
+        # ccxt'nin set_markets() içindeki keysort çağrısı None key'leri sıralamaya
+        # çalışınca TypeError fırlatıyor. load_markets() dönmeden önce crash oluyor,
+        # bu yüzden sonradan temizlemek yerine keysort'u instance seviyesinde patch ediyoruz.
+        self.ex.keysort = lambda d: dict(
+            sorted((k, v) for k, v in d.items() if k is not None)
+        )
+        retryable = (
+            ccxt.OnMaintenance,
+            ccxt.ExchangeNotAvailable,
+            ccxt.RequestTimeout,
+            ccxt.NetworkError,
+            ccxt.DDoSProtection,
+            ccxt.RateLimitExceeded,
+        )
+        last_exc: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                self.ex.load_markets()
+                _debug_log("[MARKETS] load_markets tamamlandı")
+                return
+            except retryable as exc:
+                last_exc = exc
+                if attempt >= 3:
+                    break
+                _debug_log(f"[MARKETS RETRY] attempt={attempt} err={exc}")
+                time.sleep(2 * attempt)
+            except Exception as exc:
+                _debug_log(f"[MARKETS ERROR] {exc}")
+                raise
+        if last_exc is not None:
+            raise last_exc
 
     def load_markets(self) -> dict[str, Any]:
         return self.ex.load_markets()

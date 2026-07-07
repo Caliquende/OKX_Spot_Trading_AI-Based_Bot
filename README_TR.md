@@ -44,7 +44,7 @@ Kod tabanındaki mevcut yapıya göre botun ana amacı şudur:
 - `core/`: execution, risk, health, reconcile, portfolio ve pozisyon mantığı
 - `strategy/`: rejim ve scoring mantığı
 - `indicators/`: teknik indikatör hesaplamaları
-- `analysis/`: Groq, Exa, CoinGecko tabanlı research/sentiment katmanı
+- `analysis/`: Bedrock/Groq, Exa, CoinGecko tabanlı research/sentiment katmanı
 - `db/`: SQLite şema ve repository katmanı
 - `reporting/`: Telegram bildirimleri
 - `docs/`: masaüstü uygulama notları ve UI tasarım dökümleri
@@ -57,7 +57,7 @@ Kod tabanındaki mevcut yapıya göre botun ana amacı şudur:
 - OKX API bilgileri
 - SQLite, Python ile birlikte gelir
 - Bildirimler ve uzaktan kontrol için isteğe bağlı Telegram bot token ve chat ID
-- AI/research özellikleri için isteğe bağlı Groq, Exa ve CoinGecko bilgileri
+- AI/research özellikleri için isteğe bağlı AWS Bedrock API key, Groq, Exa ve CoinGecko bilgileri
 
 ## Python Bağımlılıkları
 
@@ -225,7 +225,7 @@ Repo içinde görünen önemli ayar grupları:
 - TP/SL: `STOP_LOSS_PCT`, `PARTIAL_TAKE_PROFIT_PCT`, `FULL_TAKE_PROFIT_PCT`, `BREAK_EVEN_*`, `TRAILING_TAKE_PROFIT_*`
 - Rejim motoru: `REGIME_*`
 - Telegram: `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`, `NOTIFY_EVERY_CYCLE`
-- AI / research: `LLM_ENABLED`, `GROQ_*`, `EXA_API_KEY`, `COINGECKO_*`
+- AI / research: `LLM_ENABLED`, `LLM_PROVIDER_ORDER`, `AWS_BEARER_TOKEN_BEDROCK`, `BEDROCK_*`, `GROQ_*`, `EXA_API_KEY`, `COINGECKO_*`
 
 ## Veritabanı ve Durum Yönetimi
 
@@ -256,7 +256,7 @@ Takip etmeye değer log etiketleri:
 - `[SELL SENT]`
 - `[TPSL CHECK]`
 - `[TPSL TRIGGER]`
-- `[GROQ REFRESH]`
+- `[LLM REFRESH]`
 - `[AI THRESHOLD]`
 
 ## Geliştirme Notları
