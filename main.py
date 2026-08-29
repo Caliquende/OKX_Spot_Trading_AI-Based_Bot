@@ -4114,6 +4114,7 @@ def main() -> None:
 
                     log_line = (
                         f"{symbol}{ai_text} | profile={effective_profile}:{profile_reason} | regime={regime}{trend_bias_text} | total={total_score:.2f} | action={action} | stance={stance} | streak={streak} "
+                        f"| thresholds={thresholds_text} | position={pos_text} | tpsl={tpsl_note} | exec={order_text} | why={decision_reason}{groq_text}"
                         f"| thresholds={thresholds_text} | position={pos_text} | tpsl={tpsl_note} | exec={order_text}{policy_text} | why={decision_reason}{groq_text}"
                     )
                     symbol_lines.append(log_line)
